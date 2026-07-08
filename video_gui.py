@@ -24,8 +24,8 @@ class VolumePopup(QWidget):
         QWidget#volumePopup { background:#2b2b2b; border:1px solid #ffd400; border-radius:4px; }
         QLabel#volumeText { color:#ffd400; font-weight:800; }
         QSlider::groove:vertical { width:5px; background:#777777; border-radius:2px; }
-        QSlider::sub-page:vertical { background:#ffd400; border-radius:2px; }
-        QSlider::add-page:vertical { background:#777777; border-radius:2px; }
+        QSlider::sub-page:vertical { background:#777777; border-radius:2px; }
+        QSlider::add-page:vertical { background:#ffd400; border-radius:2px; }
         QSlider::handle:vertical { width:18px; height:18px; margin:0 -7px; border-radius:9px; background:#ffd400; }
         """)
         layout = QVBoxLayout(self)
@@ -36,6 +36,8 @@ class VolumePopup(QWidget):
         self.value_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.slider = QSlider(Qt.Orientation.Vertical)
         self.slider.setRange(0, 100)
+        self.slider.setInvertedAppearance(False)
+        self.slider.setInvertedControls(False)
         self.slider.setValue(int(round(self.audio_output.volume() * 100)))
         self.slider.valueChanged.connect(self.set_volume)
         layout.addWidget(self.value_label)
@@ -71,6 +73,161 @@ class VolumeButton(IconButton):
         self.popup.slider.setFocus()
 '''
 
+TRIM_RANGE_BAR_CODE = r'''
+class TrimRangeBar(QWidget):
+    startChanged = pyqtSignal(int)
+    endChanged = pyqtSignal(int)
+    seekRequested = pyqtSignal(int)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.duration = 0
+        self.start_value = 0
+        self.end_value = 0
+        self.position = 0
+        self.drag_target: str | None = None
+        self.setMinimumHeight(54)
+        self.setMouseTracking(True)
+
+    def set_duration(self, duration: int) -> None:
+        self.duration = max(0, duration)
+        self.start_value = max(0, min(self.start_value, self.duration))
+        self.end_value = self.duration if self.end_value <= 0 else max(self.start_value, min(self.end_value, self.duration))
+        self.position = max(self.start_value, min(self.position, self.end_value if self.end_value > self.start_value else self.duration))
+        self.update()
+
+    def set_position(self, position: int) -> None:
+        self.position = max(0, min(position, self.duration))
+        self.update()
+
+    def set_range_values(self, start: int, end: int) -> None:
+        start = max(0, min(start, self.duration))
+        end = max(start, min(end, self.duration))
+        self.start_value = start
+        self.end_value = end
+        self.position = start
+        self.update()
+
+    def bar_rect(self) -> QRect:
+        return QRect(12, 24, max(1, self.width() - 24), 16)
+
+    def value_to_x(self, value: int) -> int:
+        rect = self.bar_rect()
+        if self.duration <= 0:
+            return rect.left()
+        return rect.left() + int(rect.width() * value / self.duration)
+
+    def x_to_value(self, x: int) -> int:
+        rect = self.bar_rect()
+        x = max(rect.left(), min(x, rect.right()))
+        if rect.width() <= 0 or self.duration <= 0:
+            return 0
+        return int((x - rect.left()) / rect.width() * self.duration)
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        rect = self.bar_rect()
+        y = rect.center().y()
+        sx = self.value_to_x(self.start_value)
+        ex = self.value_to_x(self.end_value)
+        px = self.value_to_x(self.position)
+
+        painter.setPen(QPen(QColor("#bdbdbd"), 3))
+        painter.drawLine(rect.left(), y, rect.right(), y)
+
+        painter.setPen(QPen(QColor("#ffd400"), 4))
+        painter.drawLine(sx, y, ex, y)
+
+        if abs(px - sx) > 13:
+            painter.setPen(QPen(QColor("#ffd400"), 2))
+            painter.drawLine(sx, y - 8, sx, y + 8)
+
+        painter.setPen(QPen(QColor("#ffd400"), 3))
+        painter.setBrush(QColor("#5a5a5a"))
+        painter.drawEllipse(px - 9, y - 9, 18, 18)
+
+        painter.setPen(QPen(QColor("#ffd400"), 3))
+        painter.drawLine(ex, y - 16, ex, y + 16)
+        painter.drawLine(ex - 3, y - 16, ex + 3, y - 16)
+        painter.drawLine(ex - 3, y + 16, ex + 3, y + 16)
+
+        self.draw_tag(painter, px, 0, self.format_msec(self.position))
+        self.draw_tag(painter, ex, 0, self.format_msec(self.end_value))
+
+    def draw_tag(self, painter: QPainter, x: int, y: int, text: str) -> None:
+        width = 66
+        left = max(0, min(x - width // 2, self.width() - width))
+        rect = QRect(left, y, width, 22)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor("#ffd400"))
+        painter.drawRoundedRect(rect, 4, 4)
+        painter.setPen(QColor("#111111"))
+        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if self.duration <= 0:
+            return
+        x = int(event.position().x())
+        sx = self.value_to_x(self.start_value)
+        ex = self.value_to_x(self.end_value)
+        px = self.value_to_x(self.position)
+        start_hit = abs(x - sx) <= 34 or abs(x - px) <= 24 or (sx <= x <= sx + 54)
+        end_hit = abs(x - ex) <= 34
+        if start_hit and not end_hit:
+            self.drag_target = "start"
+            value = min(self.x_to_value(x), self.end_value)
+            self.start_value = value
+            self.position = value
+            self.startChanged.emit(value)
+            self.seekRequested.emit(value)
+        elif end_hit:
+            self.drag_target = "end"
+        else:
+            self.drag_target = "position"
+            value = self.x_to_value(x)
+            self.position = value
+            self.seekRequested.emit(value)
+        self.update()
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        if not self.drag_target or self.duration <= 0:
+            return
+        value = self.x_to_value(int(event.position().x()))
+        if self.drag_target == "start":
+            value = min(value, self.end_value)
+            self.start_value = value
+            self.position = value
+            self.startChanged.emit(value)
+            self.seekRequested.emit(value)
+        elif self.drag_target == "end":
+            value = max(value, self.start_value)
+            self.end_value = value
+            self.endChanged.emit(value)
+        else:
+            self.position = value
+            self.seekRequested.emit(value)
+        self.update()
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        self.drag_target = None
+
+    def format_msec(self, msec: int) -> str:
+        total = max(0, msec) / 1000
+        minutes = int(total // 60)
+        seconds = total % 60
+        return f"{minutes:02d}:{seconds:04.1f}"
+'''
+
+
+def replace_between(source: str, start_marker: str, end_marker: str, replacement: str) -> str:
+    start = source.find(start_marker)
+    end = source.find(end_marker, start)
+    if start == -1 or end == -1:
+        return source
+    return source[:start] + replacement + "\n\n" + source[end:]
+
 
 def load_editor_source() -> str:
     repo_dir = Path(__file__).resolve().parent
@@ -103,38 +260,9 @@ def load_editor_source() -> str:
         "class TimelineCanvas(QFrame):",
         VOLUME_BUTTON_CODE + "\n\nclass TimelineCanvas(QFrame):",
     )
-    source = source.replace(
-        'self.volume_icon = StaticIcon("volume")',
-        'self.volume_icon = VolumeButton(self.audio_output)',
-    )
-    source = source.replace(
-        'self.trim_volume_icon = StaticIcon("volume")',
-        'self.trim_volume_icon = VolumeButton(self.audio_output)',
-    )
-
-    source = source.replace(
-        '        painter.setPen(QPen(QColor("#ffd400"), 2))\n'
-        '        painter.drawLine(px, y - 15, px, y + 15)',
-        '        if self.drag_target not in {"start", "end"} and abs(px - sx) > 14 and abs(px - ex) > 14:\n'
-        '            painter.setPen(QPen(QColor("#ffd400"), 2))\n'
-        '            painter.drawLine(px, y - 15, px, y + 15)',
-    )
-
-    source = source.replace(
-        '        if abs(x - sx) <= 18:\n'
-        '            self.drag_target = "start"\n'
-        '            self.position = self.start_value\n'
-        '            self.seekRequested.emit(self.position)\n'
-        '        elif abs(x - ex) <= 18:',
-        '        start_hit = abs(x - sx) <= 34 or (sx <= x <= sx + 54) or (x < sx and sx - x <= 34)\n'
-        '        end_hit = abs(x - ex) <= 34\n'
-        '        if start_hit:\n'
-        '            self.drag_target = "start"\n'
-        '            self.position = self.start_value\n'
-        '            self.seekRequested.emit(self.position)\n'
-        '        elif end_hit:',
-    )
-
+    source = replace_between(source, "class TrimRangeBar(QWidget):", "class MediaCard(QFrame):", TRIM_RANGE_BAR_CODE)
+    source = source.replace('self.volume_icon = StaticIcon("volume")', 'self.volume_icon = VolumeButton(self.audio_output)')
+    source = source.replace('self.trim_volume_icon = StaticIcon("volume")', 'self.trim_volume_icon = VolumeButton(self.audio_output)')
     return source
 
 
