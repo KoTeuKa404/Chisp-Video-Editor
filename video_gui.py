@@ -4,8 +4,10 @@ import sys
 import tempfile
 from pathlib import Path
 
-from PyQt6.QtCore import QObject, QThread, Qt, pyqtSignal
+from PyQt6.QtCore import QObject, QThread, Qt, QUrl, pyqtSignal
 from PyQt6.QtGui import QPixmap
+from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer
+from PyQt6.QtMultimediaWidgets import QVideoWidget
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -25,7 +27,6 @@ from PyQt6.QtWidgets import (
     QSlider,
     QSpinBox,
     QSplitter,
-    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -40,6 +41,7 @@ from video_core import (
     render_preview_frame,
 )
 
+VIDEO_SUFFIXES = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v"}
 
 OPERATION_LABELS = {
     "compress": "Compress",
@@ -51,7 +53,6 @@ OPERATION_LABELS = {
     "mute": "Mute",
     "thumbnail": "Thumbnail",
 }
-
 
 APP_QSS = """
 QMainWindow { background: #1e1e1e; }
@@ -67,9 +68,11 @@ QFrame#mediaCard { background: #2b2b2b; border: 2px solid #555555; }
 QFrame#mediaCard:hover { border: 2px solid #ffd400; }
 QFrame#mediaCard[selected="true"] { border: 3px solid #ffd400; background: #252525; }
 QFrame#mediaThumb { background: #111111; border: 1px solid #222222; }
-QFrame#timelineClip { background: #050505; border: 1px solid #000000; }
-QFrame#audioClip { background: #5d43c9; border: 2px solid #ffd400; }
 QFrame#settingsPanel { background: #252525; border: 1px solid #555555; }
+QFrame#timelineClip { background: #070707; border: 1px solid #101010; }
+QFrame#timelineClipItem { background: #000000; border: 2px solid #ffd400; }
+QFrame#timelineClipItem[selected="true"] { border: 3px solid #ffd400; background: #151515; }
+QFrame#audioClip { background: #5d43c9; border: 2px solid #ffd400; }
 QLabel#title { font-size: 14px; font-weight: 700; color: #ffffff; }
 QLabel#mediaTitle { color: #ffffff; font-size: 12px; font-weight: 700; }
 QLabel#mediaDuration { background: #000000; color: #ffffff; padding: 2px 5px; border-radius: 3px; }
@@ -114,7 +117,6 @@ QScrollBar:vertical { background: #333333; width: 10px; }
 QScrollBar::handle:vertical { background: #777777; min-height: 30px; }
 QScrollBar:horizontal { background: #333333; height: 10px; }
 QScrollBar::handle:horizontal { background: #777777; min-width: 30px; }
-QTextEdit { background: #111111; color: #cfcfcf; border: 1px solid #444444; font-family: Consolas; font-size: 12px; }
 """
 
 
@@ -142,12 +144,13 @@ class RenderWorker(QObject):
 
 
 class PreviewWorker(QObject):
-    ready = pyqtSignal(str)
+    ready = pyqtSignal(str, str)
     failed = pyqtSignal(str)
     finished = pyqtSignal()
 
-    def __init__(self, job: VideoJob, preview_path: Path, preview_time: str | None) -> None:
+    def __init__(self, key: str, job: VideoJob, preview_path: Path, preview_time: str | None) -> None:
         super().__init__()
+        self.key = key
         self.job = job
         self.preview_path = preview_path
         self.preview_time = preview_time
@@ -155,7 +158,7 @@ class PreviewWorker(QObject):
     def run(self) -> None:
         try:
             render_preview_frame(self.job, self.preview_path, self.preview_time)
-            self.ready.emit(str(self.preview_path))
+            self.ready.emit(self.key, str(self.preview_path))
         except Exception as exc:
             self.failed.emit(str(exc))
         finally:
@@ -227,12 +230,59 @@ class MediaCard(QFrame):
         return value if len(value) <= limit else value[: limit - 1] + "…"
 
 
+class TimelineClip(QFrame):
+    clicked = pyqtSignal(int)
+    remove_clicked = pyqtSignal(int)
+
+    def __init__(self, index: int, path: Path, duration_text: str) -> None:
+        super().__init__()
+        self.index = index
+        self.path = path
+        self.setObjectName("timelineClipItem")
+        self.setProperty("selected", False)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setMinimumWidth(220)
+        self.setMaximumWidth(360)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
+
+        name = QLabel(path.name)
+        name.setObjectName("mediaTitle")
+        name.setWordWrap(True)
+
+        duration = QLabel(duration_text)
+        duration.setObjectName("mediaDuration")
+
+        remove = QPushButton("×")
+        remove.setObjectName("toolButton")
+        remove.setMaximumWidth(28)
+        remove.clicked.connect(lambda: self.remove_clicked.emit(self.index))
+
+        layout.addWidget(QLabel(str(index + 1)))
+        layout.addWidget(name, stretch=1)
+        layout.addWidget(duration)
+        layout.addWidget(remove)
+
+    def mousePressEvent(self, event) -> None:
+        self.clicked.emit(self.index)
+        super().mousePressEvent(event)
+
+    def set_selected(self, selected: bool) -> None:
+        self.setProperty("selected", selected)
+        self.style().unpolish(self)
+        self.style().polish(self)
+
+
 class VideoToolWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
 
         self.media_paths: list[Path] = []
         self.media_cards: dict[Path, MediaCard] = {}
+        self.timeline_paths: list[Path] = []
+        self.timeline_widgets: list[TimelineClip] = []
         self.current_input_path: Path | None = None
 
         self.render_thread: QThread | None = None
@@ -241,11 +291,20 @@ class VideoToolWindow(QMainWindow):
         self.preview_worker: PreviewWorker | None = None
 
         self.temp_dir = tempfile.TemporaryDirectory()
-        self.preview_pixmap_original: QPixmap | None = None
+        self.thumb_cache: dict[Path, QPixmap] = {}
+        self.slider_is_pressed = False
 
         self.setWindowTitle("Chisp Video Editor")
         self.resize(1600, 920)
         self.setMinimumSize(1180, 720)
+        self.setAcceptDrops(True)
+
+        self.player = QMediaPlayer(self)
+        self.audio_output = QAudioOutput(self)
+        self.audio_output.setVolume(0.85)
+        self.video_widget = QVideoWidget()
+        self.player.setAudioOutput(self.audio_output)
+        self.player.setVideoOutput(self.video_widget)
 
         self.add_files_btn = QPushButton("+ Add files")
         self.add_files_btn.setObjectName("yellowButton")
@@ -320,15 +379,10 @@ class VideoToolWindow(QMainWindow):
         self.output_edit.setPlaceholderText("Output path")
         self.output_btn = QPushButton("Browse")
 
-        self.preview_label = QLabel("Add a video to Media Library")
-        self.preview_label.setObjectName("muted")
-        self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.preview_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-
         self.play_btn = QPushButton("▶")
         self.play_btn.setObjectName("playButton")
         self.preview_slider = QSlider(Qt.Orientation.Horizontal)
-        self.preview_slider.setRange(0, 1000)
+        self.preview_slider.setRange(0, 0)
         self.time_left_label = QLabel("00:00.0")
         self.time_left_label.setObjectName("muted")
         self.time_right_label = QLabel("00:00")
@@ -339,20 +393,14 @@ class VideoToolWindow(QMainWindow):
         self.status_label.setObjectName("muted")
         self.percent_label = QLabel("0%")
         self.percent_label.setObjectName("muted")
-        self.timeline_clip_label = QLabel("Drop video here")
-        self.timeline_clip_label.setObjectName("muted")
-        self.timeline_clip_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.timeline_duration_label = QLabel("")
         self.timeline_duration_label.setObjectName("timelineTime")
-        self.log_edit = QTextEdit()
-        self.log_edit.setReadOnly(True)
-        self.log_edit.setMaximumHeight(90)
-        self.log_edit.setPlaceholderText("FFmpeg log...")
 
         self._build_layout()
         self._connect()
         self._refresh_operation_state()
         self._style_combo_popups()
+        self.rebuild_timeline()
 
     def _build_layout(self) -> None:
         root = QWidget()
@@ -381,7 +429,7 @@ class VideoToolWindow(QMainWindow):
         layout.setSpacing(8)
         title = QLabel("Chisp Video Editor")
         title.setObjectName("title")
-        project = QLabel("- My project 1")
+        project = QLabel("- Drag videos here and edit timeline")
         project.setObjectName("muted")
         layout.addWidget(title)
         layout.addWidget(project)
@@ -424,6 +472,7 @@ class VideoToolWindow(QMainWindow):
     def _build_media_library(self) -> QWidget:
         panel = QFrame()
         panel.setObjectName("leftPanel")
+        panel.setAcceptDrops(True)
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(6)
@@ -488,7 +537,7 @@ class VideoToolWindow(QMainWindow):
         monitor.setObjectName("monitor")
         monitor_layout = QVBoxLayout(monitor)
         monitor_layout.setContentsMargins(0, 0, 0, 0)
-        monitor_layout.addWidget(self.preview_label)
+        monitor_layout.addWidget(self.video_widget)
         layout.addWidget(monitor, stretch=1)
         controls = QHBoxLayout()
         controls.setSpacing(12)
@@ -503,7 +552,7 @@ class VideoToolWindow(QMainWindow):
         preview_row.addStretch()
         preview_row.addWidget(QLabel("Preview time:"))
         preview_row.addWidget(self.preview_time_edit)
-        update_preview_btn = QPushButton("Update preview")
+        update_preview_btn = QPushButton("Update thumbnail")
         update_preview_btn.clicked.connect(self.start_preview)
         preview_row.addWidget(update_preview_btn)
         layout.addLayout(preview_row)
@@ -520,6 +569,8 @@ class VideoToolWindow(QMainWindow):
         layout.addWidget(self.offset_btn)
         layout.addWidget(self.split_btn)
         layout.addStretch()
+        layout.addWidget(QLabel("Drop multiple videos to join them on export"))
+        layout.addStretch()
         layout.addWidget(self.status_label)
         layout.addSpacing(16)
         layout.addWidget(self.percent_label)
@@ -530,10 +581,12 @@ class VideoToolWindow(QMainWindow):
     def _build_timeline_area(self) -> QWidget:
         panel = QFrame()
         panel.setObjectName("timelinePanel")
-        panel.setMinimumHeight(250)
+        panel.setMinimumHeight(220)
+        panel.setAcceptDrops(True)
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(8)
+
         ruler = QFrame()
         ruler.setFixedHeight(22)
         ruler_layout = QHBoxLayout(ruler)
@@ -542,16 +595,29 @@ class VideoToolWindow(QMainWindow):
         ruler_layout.addStretch()
         ruler_layout.addWidget(self.timeline_duration_label)
         layout.addWidget(ruler)
+
         video_track = QFrame()
         video_track.setObjectName("timelineClip")
-        video_track.setMinimumHeight(120)
+        video_track.setMinimumHeight(118)
         video_layout = QHBoxLayout(video_track)
         video_layout.setContentsMargins(8, 8, 8, 8)
         track_name = QLabel("Video")
         track_name.setObjectName("trackName")
         track_name.setFixedWidth(70)
         video_layout.addWidget(track_name)
-        video_layout.addWidget(self.timeline_clip_label, stretch=1)
+
+        timeline_scroll = QScrollArea()
+        timeline_scroll.setWidgetResizable(True)
+        timeline_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        timeline_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.timeline_widget = QWidget()
+        self.timeline_layout = QHBoxLayout(self.timeline_widget)
+        self.timeline_layout.setContentsMargins(0, 0, 0, 0)
+        self.timeline_layout.setSpacing(8)
+        self.timeline_layout.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        timeline_scroll.setWidget(self.timeline_widget)
+        video_layout.addWidget(timeline_scroll, stretch=1)
+
         audio_track = QFrame()
         audio_track.setObjectName("audioClip")
         audio_track.setFixedHeight(36)
@@ -560,13 +626,13 @@ class VideoToolWindow(QMainWindow):
         audio_name = QLabel("Audio")
         audio_name.setObjectName("trackName")
         audio_name.setFixedWidth(70)
-        audio_label = QLabel("audio track")
-        audio_label.setObjectName("muted")
+        self.audio_track_label = QLabel("audio follows video clips")
+        self.audio_track_label.setObjectName("muted")
         audio_layout.addWidget(audio_name)
-        audio_layout.addWidget(audio_label)
+        audio_layout.addWidget(self.audio_track_label)
+
         layout.addWidget(video_track)
         layout.addWidget(audio_track)
-        layout.addWidget(self.log_edit)
         return panel
 
     def _connect(self) -> None:
@@ -574,8 +640,16 @@ class VideoToolWindow(QMainWindow):
         self.export_btn.clicked.connect(self.start_render)
         self.cancel_btn.clicked.connect(self.cancel_render)
         self.output_btn.clicked.connect(self.choose_output_file)
+        self.play_btn.clicked.connect(self.play_pause)
         self.operation_combo.currentIndexChanged.connect(self._refresh_operation_state)
         self.operation_combo.currentIndexChanged.connect(self.refresh_output_suggestion)
+        self.player.positionChanged.connect(self.player_position_changed)
+        self.player.durationChanged.connect(self.player_duration_changed)
+        self.player.playbackStateChanged.connect(self.player_state_changed)
+        self.player.errorOccurred.connect(self.player_error)
+        self.preview_slider.sliderPressed.connect(self.slider_pressed)
+        self.preview_slider.sliderReleased.connect(self.slider_released)
+        self.preview_slider.sliderMoved.connect(self.seek_video)
 
     def _style_combo_popups(self) -> None:
         popup_qss = """
@@ -587,6 +661,34 @@ class VideoToolWindow(QMainWindow):
         for combo in (self.operation_combo, self.codec_combo, self.preset_combo):
             combo.view().setStyleSheet(popup_qss)
 
+    def dragEnterEvent(self, event) -> None:
+        if self.event_has_video_urls(event):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event) -> None:
+        paths = self.paths_from_drop(event)
+        if paths:
+            self.add_paths(paths, append_to_timeline=True, select_first=True)
+            event.acceptProposedAction()
+
+    def event_has_video_urls(self, event) -> bool:
+        return bool(self.paths_from_drop(event))
+
+    def paths_from_drop(self, event) -> list[Path]:
+        data = event.mimeData()
+        if not data.hasUrls():
+            return []
+        paths: list[Path] = []
+        for url in data.urls():
+            if not url.isLocalFile():
+                continue
+            path = Path(url.toLocalFile())
+            if path.is_file() and path.suffix.lower() in VIDEO_SUFFIXES:
+                paths.append(path)
+        return paths
+
     def add_files(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(
             self,
@@ -594,15 +696,25 @@ class VideoToolWindow(QMainWindow):
             "",
             "Video files (*.mp4 *.mkv *.mov *.avi *.webm *.m4v);;All files (*.*)",
         )
-        if not paths:
+        self.add_paths([Path(raw) for raw in paths], append_to_timeline=True, select_first=True)
+
+    def add_paths(self, paths: list[Path], *, append_to_timeline: bool, select_first: bool) -> None:
+        clean_paths = [path.expanduser().resolve() for path in paths if path.is_file() and path.suffix.lower() in VIDEO_SUFFIXES]
+        if not clean_paths:
             return
-        for raw in paths:
-            path = Path(raw)
+        for path in clean_paths:
             if path not in self.media_paths:
                 self.media_paths.append(path)
+            if append_to_timeline:
+                self.timeline_paths.append(path)
         self.rebuild_media_grid()
-        if self.current_input_path is None and self.media_paths:
-            self.select_media(self.media_paths[0])
+        self.rebuild_timeline()
+        if select_first:
+            self.select_media(clean_paths[0])
+        elif self.current_input_path is None and self.timeline_paths:
+            self.select_media(self.timeline_paths[0])
+        if not self.output_edit.text().strip() and self.timeline_paths:
+            self.output_edit.setText(str(self.suggest_output_path(self.timeline_paths[0])))
 
     def rebuild_media_grid(self) -> None:
         while self.media_grid.count():
@@ -617,22 +729,115 @@ class VideoToolWindow(QMainWindow):
             card.clicked.connect(self.select_media)
             self.media_cards[path] = card
             self.media_grid.addWidget(card, index // columns, index % columns)
+            if path in self.thumb_cache:
+                card.set_thumbnail(self.thumb_cache[path])
         self.update_selected_cards()
+
+    def rebuild_timeline(self) -> None:
+        while self.timeline_layout.count():
+            item = self.timeline_layout.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.deleteLater()
+        self.timeline_widgets.clear()
+        if not self.timeline_paths:
+            placeholder = QLabel("Drop videos here. Multiple clips will be joined on export.")
+            placeholder.setObjectName("muted")
+            placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.timeline_layout.addWidget(placeholder)
+            self.timeline_duration_label.setText("")
+            self.audio_track_label.setText("audio follows video clips")
+            return
+        total = 0
+        for index, path in enumerate(self.timeline_paths):
+            duration_text = self.duration_text(path)
+            total += self.duration_seconds(path)
+            clip = TimelineClip(index, path, duration_text)
+            clip.clicked.connect(self.select_timeline_clip)
+            clip.remove_clicked.connect(self.remove_timeline_clip)
+            self.timeline_widgets.append(clip)
+            self.timeline_layout.addWidget(clip)
+        self.timeline_duration_label.setText(self.format_seconds(total))
+        self.audio_track_label.setText(f"{len(self.timeline_paths)} clip(s) audio")
+        self.update_timeline_selection()
 
     def select_media(self, path: Path) -> None:
         self.current_input_path = path
         self.update_selected_cards()
+        self.update_timeline_selection()
         if not self.output_edit.text().strip():
             self.output_edit.setText(str(self.suggest_output_path(path)))
-        duration = self.duration_text(path)
-        self.timeline_clip_label.setText(path.name)
-        self.timeline_duration_label.setText(duration)
-        self.time_right_label.setText(duration)
+        self.load_player(path)
         self.start_preview()
+
+    def select_timeline_clip(self, index: int) -> None:
+        if 0 <= index < len(self.timeline_paths):
+            self.select_media(self.timeline_paths[index])
+
+    def remove_timeline_clip(self, index: int) -> None:
+        if 0 <= index < len(self.timeline_paths):
+            removed = self.timeline_paths.pop(index)
+            if self.current_input_path == removed:
+                self.current_input_path = self.timeline_paths[0] if self.timeline_paths else None
+            self.rebuild_timeline()
+            if self.current_input_path:
+                self.select_media(self.current_input_path)
+            else:
+                self.player.stop()
+                self.player.setSource(QUrl())
 
     def update_selected_cards(self) -> None:
         for path, card in self.media_cards.items():
             card.set_selected(path == self.current_input_path)
+
+    def update_timeline_selection(self) -> None:
+        for widget in self.timeline_widgets:
+            widget.set_selected(widget.path == self.current_input_path)
+
+    def load_player(self, path: Path) -> None:
+        self.player.stop()
+        self.player.setSource(QUrl.fromLocalFile(str(path.resolve())))
+        self.time_left_label.setText("00:00.0")
+        self.time_right_label.setText(self.duration_text(path))
+        self.preview_slider.setValue(0)
+
+    def play_pause(self) -> None:
+        if self.current_input_path is None:
+            QMessageBox.information(self, "No video", "Drag a video into the editor first.")
+            return
+        if self.player.source().isEmpty():
+            self.load_player(self.current_input_path)
+        if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            self.player.pause()
+        else:
+            self.player.play()
+
+    def player_state_changed(self, state: QMediaPlayer.PlaybackState) -> None:
+        self.play_btn.setText("⏸" if state == QMediaPlayer.PlaybackState.PlayingState else "▶")
+
+    def player_position_changed(self, position: int) -> None:
+        if not self.slider_is_pressed:
+            self.preview_slider.setValue(position)
+        self.time_left_label.setText(self.format_msec(position, with_tenths=True))
+
+    def player_duration_changed(self, duration: int) -> None:
+        self.preview_slider.setRange(0, max(0, duration))
+        if duration > 0:
+            self.time_right_label.setText(self.format_msec(duration))
+
+    def player_error(self, error, error_string: str) -> None:
+        if error_string:
+            self.status_label.setText(f"Playback error: {error_string}")
+
+    def slider_pressed(self) -> None:
+        self.slider_is_pressed = True
+
+    def slider_released(self) -> None:
+        self.slider_is_pressed = False
+        self.player.setPosition(self.preview_slider.value())
+
+    def seek_video(self, value: int) -> None:
+        self.time_left_label.setText(self.format_msec(value, with_tenths=True))
 
     def current_operation(self) -> str:
         return str(self.operation_combo.currentData())
@@ -665,7 +870,9 @@ class VideoToolWindow(QMainWindow):
 
     def choose_output_file(self) -> None:
         operation = self.current_operation()
-        if operation == "extract_audio":
+        if len(self.timeline_paths) > 1:
+            file_filter = "Video files (*.mp4 *.mkv *.mov *.avi *.webm);;All files (*.*)"
+        elif operation == "extract_audio":
             file_filter = "Audio files (*.mp3 *.m4a *.aac *.wav);;All files (*.*)"
         elif operation == "thumbnail":
             file_filter = "Image files (*.jpg *.jpeg *.png *.webp);;All files (*.*)"
@@ -676,41 +883,52 @@ class VideoToolWindow(QMainWindow):
             self.output_edit.setText(path)
 
     def suggest_output_path(self, input_path: Path) -> Path:
-        operation = self.current_operation()
+        operation = "joined" if len(self.timeline_paths) > 1 else self.current_operation()
         suffix = input_path.suffix or ".mp4"
         if operation == "extract_audio":
             suffix = ".mp3"
         elif operation == "thumbnail":
             suffix = ".jpg"
+        elif operation == "joined":
+            suffix = ".mp4"
         return input_path.with_name(f"{input_path.stem}_{operation}{suffix}")
 
     def refresh_output_suggestion(self) -> None:
-        if self.current_input_path is None:
+        source = self.timeline_paths[0] if self.timeline_paths else self.current_input_path
+        if source is None:
             return
         output_text = self.output_edit.text().strip()
         if not output_text:
-            self.output_edit.setText(str(self.suggest_output_path(self.current_input_path)))
+            self.output_edit.setText(str(self.suggest_output_path(source)))
             return
         output_path = Path(output_text)
-        if any(tag in output_path.stem for tag in OPERATION_LABELS):
-            self.output_edit.setText(str(self.suggest_output_path(self.current_input_path)))
+        tags = set(OPERATION_LABELS) | {"joined"}
+        if any(tag in output_path.stem for tag in tags):
+            self.output_edit.setText(str(self.suggest_output_path(source)))
 
     def optional_int(self, spin: QSpinBox) -> int | None:
         value = spin.value()
         return None if value <= 0 else value
 
     def build_job(self, *, allow_missing_output: bool = False) -> VideoJob:
-        if self.current_input_path is None:
-            raise VideoError("Спочатку додай і вибери відео в Media Library")
+        if not self.timeline_paths and self.current_input_path is None:
+            raise VideoError("Спочатку перетягни відео в редактор")
+
+        input_paths = tuple(self.timeline_paths) if self.timeline_paths else (self.current_input_path,)  # type: ignore[arg-type]
+        input_path = input_paths[0]
+        operation = "concat" if len(input_paths) > 1 else self.current_operation()
+
         output_text = self.output_edit.text().strip()
-        if not output_text and not allow_missing_output:
-            raise VideoError("Вибери шлях експорту")
         if not output_text:
-            output_text = str(self.suggest_output_path(self.current_input_path))
+            output_text = str(self.suggest_output_path(input_path))
+            if not allow_missing_output:
+                self.output_edit.setText(output_text)
+
         return VideoJob(
-            operation=self.current_operation(),
-            input_path=self.current_input_path,
+            operation=operation,
+            input_path=input_path,
             output_path=Path(output_text),
+            input_paths=input_paths if operation == "concat" else None,
             crf=self.crf_spin.value(),
             preset=self.preset_combo.currentText(),
             codec=self.codec_combo.currentText(),
@@ -733,59 +951,50 @@ class VideoToolWindow(QMainWindow):
     def start_preview(self) -> None:
         if self.preview_thread is not None and self.preview_thread.isRunning():
             return
-        try:
-            job = self.build_job(allow_missing_output=True)
-        except VideoError as exc:
-            self.set_preview_text(str(exc))
+        if self.current_input_path is None:
             return
-
-        preview_path = Path(self.temp_dir.name) / "preview.jpg"
-        preview_time = self.preview_time_edit.text().strip() or job.start or "0"
-        self.set_preview_text("Rendering preview...")
-
+        try:
+            job = VideoJob(
+                operation=self.current_operation(),
+                input_path=self.current_input_path,
+                output_path=Path(self.temp_dir.name) / "dummy.mp4",
+                crf=self.crf_spin.value(),
+                preset=self.preset_combo.currentText(),
+                codec=self.codec_combo.currentText(),
+                width=self.optional_int(self.width_spin),
+                height=self.optional_int(self.height_spin),
+                fps=self.optional_int(self.fps_spin),
+                crop_x=self.crop_x_spin.value(),
+                crop_y=self.crop_y_spin.value(),
+                crop_w=self.optional_int(self.crop_w_spin),
+                crop_h=self.optional_int(self.crop_h_spin),
+            )
+        except Exception:
+            return
+        preview_path = Path(self.temp_dir.name) / f"thumb_{abs(hash(str(self.current_input_path)))}.jpg"
+        preview_time = self.preview_time_edit.text().strip() or "0"
         thread = QThread(self)
-        worker = PreviewWorker(job, preview_path, preview_time)
+        worker = PreviewWorker(str(self.current_input_path), job, preview_path, preview_time)
         worker.moveToThread(thread)
-
         self.preview_thread = thread
         self.preview_worker = worker
-
         thread.started.connect(worker.run)
-        worker.ready.connect(self.show_preview_image)
-        worker.failed.connect(self.preview_failed)
+        worker.ready.connect(self.thumbnail_ready)
+        worker.failed.connect(lambda _message: None)
         worker.finished.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
         thread.finished.connect(self.preview_thread_finished)
         thread.start()
 
-    def show_preview_image(self, path: str) -> None:
+    def thumbnail_ready(self, key: str, path: str) -> None:
         pixmap = QPixmap(path)
         if pixmap.isNull():
-            self.set_preview_text("Preview failed")
             return
-        self.preview_pixmap_original = pixmap
-        self.update_preview_pixmap()
-        if self.current_input_path and self.current_input_path in self.media_cards:
-            self.media_cards[self.current_input_path].set_thumbnail(pixmap)
-
-    def update_preview_pixmap(self) -> None:
-        if self.preview_pixmap_original is None or self.preview_pixmap_original.isNull():
-            return
-        scaled = self.preview_pixmap_original.scaled(
-            self.preview_label.size(),
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        self.preview_label.setPixmap(scaled)
-
-    def set_preview_text(self, text: str) -> None:
-        self.preview_pixmap_original = None
-        self.preview_label.setPixmap(QPixmap())
-        self.preview_label.setText(text)
-
-    def preview_failed(self, message: str) -> None:
-        self.set_preview_text(f"Preview error:\n{message}")
+        source = Path(key)
+        self.thumb_cache[source] = pixmap
+        if source in self.media_cards:
+            self.media_cards[source].set_thumbnail(pixmap)
 
     def preview_thread_finished(self) -> None:
         self.preview_worker = None
@@ -799,19 +1008,14 @@ class VideoToolWindow(QMainWindow):
         except VideoError as exc:
             QMessageBox.warning(self, "Export error", str(exc))
             return
-
-        self.log_edit.clear()
         self.progress.setValue(0)
         self.percent_label.setText("0%")
         self.status_label.setText("Starting export...")
-
         thread = QThread(self)
         worker = RenderWorker(job)
         worker.moveToThread(thread)
-
         self.render_thread = thread
         self.render_worker = worker
-
         thread.started.connect(worker.run)
         worker.progress.connect(self.on_progress)
         worker.log.connect(self.append_log)
@@ -821,7 +1025,6 @@ class VideoToolWindow(QMainWindow):
         worker.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
         thread.finished.connect(self.render_thread_finished)
-
         self.set_running_state(True)
         thread.start()
 
@@ -829,7 +1032,6 @@ class VideoToolWindow(QMainWindow):
         if self.render_worker:
             self.render_worker.cancel()
         self.status_label.setText("Cancelling...")
-        self.append_log("Cancelling...")
 
     def on_progress(self, value: int) -> None:
         self.progress.setValue(value)
@@ -838,8 +1040,6 @@ class VideoToolWindow(QMainWindow):
 
     def render_failed(self, message: str) -> None:
         self.status_label.setText("Export failed")
-        self.append_log("")
-        self.append_log(f"ERROR: {message}")
         if "скасовано" not in message.lower() and "cancelled" not in message.lower():
             QMessageBox.critical(self, "Export error", message)
 
@@ -857,14 +1057,19 @@ class VideoToolWindow(QMainWindow):
         self.output_btn.setEnabled(not running)
         self.operation_combo.setEnabled(not running)
 
-    def append_log(self, text: str) -> None:
-        self.log_edit.append(text)
+    def append_log(self, _text: str) -> None:
+        pass
+
+    def duration_seconds(self, path: Path) -> int:
+        try:
+            return int(probe_duration(path))
+        except Exception:
+            return 0
 
     def duration_text(self, path: Path) -> str:
-        try:
-            seconds = int(probe_duration(path))
-        except Exception:
-            return "00:00"
+        return self.format_seconds(self.duration_seconds(path))
+
+    def format_seconds(self, seconds: int) -> str:
         if seconds <= 0:
             return "00:00"
         minutes = seconds // 60
@@ -875,11 +1080,19 @@ class VideoToolWindow(QMainWindow):
             return f"{hours:02d}:{minutes:02d}:{sec:02d}"
         return f"{minutes:02d}:{sec:02d}"
 
+    def format_msec(self, msec: int, *, with_tenths: bool = False) -> str:
+        total_seconds = max(0, msec) / 1000
+        minutes = int(total_seconds // 60)
+        seconds = total_seconds % 60
+        if with_tenths:
+            return f"{minutes:02d}:{seconds:04.1f}"
+        return f"{minutes:02d}:{int(seconds):02d}"
+
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
-        self.update_preview_pixmap()
 
     def closeEvent(self, event) -> None:
+        self.player.stop()
         if self.render_thread and self.render_thread.isRunning():
             reply = QMessageBox.question(self, "Close?", "Export is still running. Cancel and close?")
             if reply != QMessageBox.StandardButton.Yes:
@@ -889,11 +1102,9 @@ class VideoToolWindow(QMainWindow):
                 self.render_worker.cancel()
             self.render_thread.quit()
             self.render_thread.wait(3000)
-
         if self.preview_thread and self.preview_thread.isRunning():
             self.preview_thread.quit()
             self.preview_thread.wait(3000)
-
         self.temp_dir.cleanup()
         event.accept()
 
