@@ -54,6 +54,17 @@ OPERATION_LABELS = {
     "thumbnail": "Thumbnail",
 }
 
+MODE_TO_OPERATION = {
+    "general": "compress",
+    "audio": "extract_audio",
+    "trim": "trim",
+    "crop": "crop",
+    "text": "compress",
+    "filters": "compress",
+    "pip": "compress",
+    "stickers": "compress",
+}
+
 APP_QSS = """
 QMainWindow { background: #1e1e1e; }
 QWidget { color: #eeeeee; font-family: Segoe UI; font-size: 13px; }
@@ -70,15 +81,16 @@ QFrame#mediaCard:hover { border: 2px solid #ffd400; }
 QFrame#mediaCard[selected="true"] { border: 3px solid #ffd400; background: #252525; }
 QFrame#mediaThumb { background: #111111; border: 1px solid #222222; }
 QFrame#settingsPanel { background: #252525; border: 1px solid #555555; }
+QFrame#modePanel { background: #2d2d2d; border: 1px solid #666666; }
 QFrame#timelineCanvas { background: #1f1f1f; border: 0px; }
 QFrame#timelineClipItem { background: #000000; border: 4px solid #ffd400; }
 QFrame#timelineClipItem[selected="true"] { border: 5px solid #ffd400; background: #050505; }
-QFrame#clipThumb { background: #020202; border: 0px; }
 QFrame#audioClip { background: #5d43c9; border: 2px solid #ffd400; }
 QLabel#title { font-size: 14px; font-weight: 700; color: #ffffff; }
 QLabel#mediaTitle { color: #ffffff; font-size: 12px; font-weight: 800; }
 QLabel#mediaDuration { background: #000000; color: #ffffff; padding: 2px 5px; border-radius: 3px; }
 QLabel#muted { color: #bbbbbb; }
+QLabel#modeTitle { color: #ffd400; font-size: 14px; font-weight: 900; }
 QLabel#bigTitle { font-size: 27px; color: #ffffff; }
 QLabel#timelineTime { color: #ffffff; font-weight: 700; }
 QLabel#trackName { color: #ffffff; font-weight: 800; }
@@ -91,9 +103,6 @@ QComboBox:focus { border: 1px solid #ffd400; }
 QComboBox::drop-down { subcontrol-origin: padding; subcontrol-position: top right; width: 24px; border-left: 1px solid #444444; background: #151515; }
 QComboBox::down-arrow { image: none; width: 0px; height: 0px; border-left: 5px solid transparent; border-right: 5px solid transparent; border-top: 6px solid #ffffff; margin-right: 7px; }
 QComboBox QAbstractItemView { background: #191919; color: #ffffff; border: 1px solid #555555; selection-background-color: #ffd400; selection-color: #111111; outline: 0px; padding: 2px; }
-QComboBox QAbstractItemView::item { background: #191919; color: #ffffff; min-height: 26px; padding: 5px 8px; }
-QComboBox QAbstractItemView::item:hover { background: #333333; color: #ffffff; }
-QComboBox QAbstractItemView::item:selected { background: #ffd400; color: #111111; }
 QPushButton { background: #3a3a3a; color: #ffffff; border: 1px solid #555555; padding: 7px 11px; font-weight: 700; }
 QPushButton:hover { background: #494949; border: 1px solid #777777; }
 QPushButton:pressed { background: #242424; }
@@ -180,18 +189,14 @@ class TimelineCanvas(QFrame):
     def paintEvent(self, event) -> None:
         super().paintEvent(event)
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
         painter.fillRect(self.rect(), QColor("#1f1f1f"))
-
         minor = QPen(QColor("#2b2b2b"))
         major = QPen(QColor("#3a3a3a"))
         for x in range(0, self.width(), 180):
             painter.setPen(major if x % 720 == 0 else minor)
             painter.drawLine(x, 0, x, self.height())
-
         painter.setPen(QPen(QColor("#777777"), 2))
         painter.drawLine(0, 0, self.width(), 0)
-
         painter.setPen(QPen(QColor("#777777"), 3))
         painter.drawLine(0, 0, 0, self.height())
         painter.setBrush(QColor("#303030"))
@@ -218,10 +223,8 @@ class MediaCard(QFrame):
         self.thumb_frame.setObjectName("mediaThumb")
         self.thumb_frame.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.thumb_frame.setMinimumSize(112, 78)
-
         thumb_layout = QVBoxLayout(self.thumb_frame)
         thumb_layout.setContentsMargins(0, 0, 0, 0)
-
         self.thumb_label = QLabel("VIDEO")
         self.thumb_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.thumb_label.setObjectName("muted")
@@ -230,7 +233,6 @@ class MediaCard(QFrame):
         title = QLabel(self._short_name(path.stem))
         title.setObjectName("mediaTitle")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
         duration = QLabel(duration_text)
         duration.setObjectName("mediaDuration")
         duration.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -275,9 +277,7 @@ class TimelineClip(QFrame):
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(6)
-
         top = QHBoxLayout()
-        top.setContentsMargins(0, 0, 0, 0)
         top.addStretch()
         close = QPushButton("×")
         close.setObjectName("clipCloseButton")
@@ -287,27 +287,21 @@ class TimelineClip(QFrame):
         root.addLayout(top)
 
         self.thumb = QLabel("")
-        self.thumb.setObjectName("muted")
         self.thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.thumb.setFrameShape(QFrame.Shape.NoFrame)
         self.thumb.setMinimumHeight(125)
-        self.thumb.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.thumb.setStyleSheet("background:#000000;")
         root.addWidget(self.thumb, stretch=1)
 
         title = QLabel(path.name)
         title.setObjectName("mediaTitle")
         title.setWordWrap(True)
-        title.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         root.addWidget(title)
-
         bottom = QHBoxLayout()
         bottom.addStretch()
         duration = QLabel(duration_text)
         duration.setObjectName("mediaDuration")
         bottom.addWidget(duration)
         root.addLayout(bottom)
-
         if pixmap is not None and not pixmap.isNull():
             self.set_thumbnail(pixmap)
 
@@ -331,18 +325,19 @@ class TimelineClip(QFrame):
 class VideoToolWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-
         self.media_paths: list[Path] = []
         self.media_cards: dict[Path, MediaCard] = {}
         self.timeline_paths: list[Path] = []
         self.timeline_widgets: list[TimelineClip] = []
         self.current_input_path: Path | None = None
+        self.current_mode = "trim"
+        self.mode_buttons: dict[str, QPushButton] = {}
+        self.marker_count = 0
 
         self.render_thread: QThread | None = None
         self.render_worker: RenderWorker | None = None
         self.preview_thread: QThread | None = None
         self.preview_worker: PreviewWorker | None = None
-
         self.temp_dir = tempfile.TemporaryDirectory()
         self.thumb_cache: dict[Path, QPixmap] = {}
         self.slider_is_pressed = False
@@ -385,69 +380,48 @@ class VideoToolWindow(QMainWindow):
         self.preset_combo.addItems(PRESETS)
         self.preset_combo.setCurrentText("medium")
 
-        self.crf_spin = QSpinBox()
-        self.crf_spin.setRange(0, 51)
-        self.crf_spin.setValue(24)
-        self.width_spin = QSpinBox()
-        self.width_spin.setRange(0, 16000)
-        self.width_spin.setSpecialValueText("Source")
-        self.width_spin.setValue(0)
-        self.height_spin = QSpinBox()
-        self.height_spin.setRange(0, 16000)
-        self.height_spin.setSpecialValueText("Source")
-        self.height_spin.setValue(0)
-        self.fps_spin = QSpinBox()
-        self.fps_spin.setRange(0, 240)
-        self.fps_spin.setSpecialValueText("Source")
-        self.fps_spin.setValue(0)
-        self.crop_x_spin = QSpinBox()
-        self.crop_x_spin.setRange(0, 16000)
-        self.crop_y_spin = QSpinBox()
-        self.crop_y_spin.setRange(0, 16000)
-        self.crop_w_spin = QSpinBox()
-        self.crop_w_spin.setRange(0, 16000)
-        self.crop_w_spin.setValue(1280)
-        self.crop_h_spin = QSpinBox()
-        self.crop_h_spin.setRange(0, 16000)
-        self.crop_h_spin.setValue(720)
+        self.crf_spin = QSpinBox(); self.crf_spin.setRange(0, 51); self.crf_spin.setValue(24)
+        self.width_spin = QSpinBox(); self.width_spin.setRange(0, 16000); self.width_spin.setSpecialValueText("Source"); self.width_spin.setValue(0)
+        self.height_spin = QSpinBox(); self.height_spin.setRange(0, 16000); self.height_spin.setSpecialValueText("Source"); self.height_spin.setValue(0)
+        self.fps_spin = QSpinBox(); self.fps_spin.setRange(0, 240); self.fps_spin.setSpecialValueText("Source"); self.fps_spin.setValue(0)
+        self.crop_x_spin = QSpinBox(); self.crop_x_spin.setRange(0, 16000)
+        self.crop_y_spin = QSpinBox(); self.crop_y_spin.setRange(0, 16000)
+        self.crop_w_spin = QSpinBox(); self.crop_w_spin.setRange(0, 16000); self.crop_w_spin.setValue(1280)
+        self.crop_h_spin = QSpinBox(); self.crop_h_spin.setRange(0, 16000); self.crop_h_spin.setValue(720)
 
         self.start_edit = QLineEdit("0")
-        self.end_edit = QLineEdit()
-        self.end_edit.setPlaceholderText("End")
-        self.duration_edit = QLineEdit()
-        self.duration_edit.setPlaceholderText("Duration")
-        self.preview_time_edit = QLineEdit("0")
-        self.preview_time_edit.setMaximumWidth(100)
+        self.end_edit = QLineEdit(); self.end_edit.setPlaceholderText("End")
+        self.duration_edit = QLineEdit(); self.duration_edit.setPlaceholderText("Duration")
+        self.preview_time_edit = QLineEdit("0"); self.preview_time_edit.setMaximumWidth(100)
         self.audio_bitrate_edit = QLineEdit("128k")
         self.no_audio_check = QCheckBox("No audio")
         self.copy_mode_check = QCheckBox("Copy mode")
-        self.overwrite_check = QCheckBox("Overwrite")
-        self.overwrite_check.setChecked(True)
-        self.output_edit = QLineEdit()
-        self.output_edit.setPlaceholderText("Output path")
+        self.overwrite_check = QCheckBox("Overwrite"); self.overwrite_check.setChecked(True)
+        self.output_edit = QLineEdit(); self.output_edit.setPlaceholderText("Output path")
         self.output_btn = QPushButton("Browse")
 
-        self.play_btn = QPushButton("▶")
-        self.play_btn.setObjectName("playButton")
-        self.preview_slider = QSlider(Qt.Orientation.Horizontal)
-        self.preview_slider.setRange(0, 0)
-        self.time_left_label = QLabel("00:00.0")
-        self.time_left_label.setObjectName("muted")
-        self.time_right_label = QLabel("00:00")
-        self.time_right_label.setObjectName("muted")
-        self.progress = QProgressBar()
-        self.progress.setValue(0)
-        self.status_label = QLabel("Ready")
-        self.status_label.setObjectName("muted")
-        self.percent_label = QLabel("0%")
-        self.percent_label.setObjectName("muted")
-        self.timeline_duration_label = QLabel("")
-        self.timeline_duration_label.setObjectName("timelineTime")
+        self.mode_title_label = QLabel("Trim")
+        self.mode_title_label.setObjectName("modeTitle")
+        self.mode_hint_label = QLabel("")
+        self.mode_hint_label.setObjectName("muted")
+        self.mode_hint_label.setWordWrap(True)
+        self.mode_primary_btn = QPushButton("Set Start")
+        self.mode_secondary_btn = QPushButton("Set End")
+
+        self.play_btn = QPushButton("▶"); self.play_btn.setObjectName("playButton")
+        self.preview_slider = QSlider(Qt.Orientation.Horizontal); self.preview_slider.setRange(0, 0)
+        self.time_left_label = QLabel("00:00.0"); self.time_left_label.setObjectName("muted")
+        self.time_right_label = QLabel("00:00"); self.time_right_label.setObjectName("muted")
+        self.progress = QProgressBar(); self.progress.setValue(0)
+        self.status_label = QLabel("Ready"); self.status_label.setObjectName("muted")
+        self.percent_label = QLabel("0%"); self.percent_label.setObjectName("muted")
+        self.timeline_duration_label = QLabel(""); self.timeline_duration_label.setObjectName("timelineTime")
 
         self._build_layout()
         self._connect()
         self._refresh_operation_state()
         self._style_combo_popups()
+        self.set_editor_mode("trim")
         self.rebuild_timeline()
 
     def _build_layout(self) -> None:
@@ -457,79 +431,46 @@ class VideoToolWindow(QMainWindow):
         main.setSpacing(0)
         main.addWidget(self._build_top_bar())
         main.addWidget(self._build_toolbar())
-
         center_splitter = QSplitter(Qt.Orientation.Horizontal)
         center_splitter.setChildrenCollapsible(False)
         center_splitter.addWidget(self._build_media_library())
         center_splitter.addWidget(self._build_preview_area())
         center_splitter.setSizes([820, 780])
-
         main.addWidget(center_splitter, stretch=1)
         main.addWidget(self._build_timeline_tools())
         main.addWidget(self._build_timeline_area())
         self.setCentralWidget(root)
 
     def _build_top_bar(self) -> QWidget:
-        bar = QFrame()
-        bar.setObjectName("topBar")
-        layout = QHBoxLayout(bar)
-        layout.setContentsMargins(10, 4, 10, 4)
-        layout.setSpacing(8)
-        title = QLabel("Chisp Video Editor")
-        title.setObjectName("title")
-        project = QLabel("- Drag videos here and edit timeline")
-        project.setObjectName("muted")
-        layout.addWidget(title)
-        layout.addWidget(project)
-        layout.addStretch()
-        layout.addWidget(self.cancel_btn)
-        layout.addWidget(self.export_btn)
+        bar = QFrame(); bar.setObjectName("topBar")
+        layout = QHBoxLayout(bar); layout.setContentsMargins(10, 4, 10, 4); layout.setSpacing(8)
+        title = QLabel("Chisp Video Editor"); title.setObjectName("title")
+        project = QLabel("- Drag videos here and edit timeline"); project.setObjectName("muted")
+        layout.addWidget(title); layout.addWidget(project); layout.addStretch(); layout.addWidget(self.cancel_btn); layout.addWidget(self.export_btn)
         return bar
 
     def _build_toolbar(self) -> QWidget:
-        bar = QFrame()
-        bar.setObjectName("toolBar")
-        layout = QHBoxLayout(bar)
-        layout.setContentsMargins(8, 6, 8, 6)
-        layout.setSpacing(8)
-        media_title = QLabel("Media Library")
-        media_title.setObjectName("bigTitle")
-        layout.addWidget(media_title)
-        layout.addSpacing(8)
-        layout.addWidget(self.add_files_btn)
-        layout.addWidget(self.add_color_btn)
+        bar = QFrame(); bar.setObjectName("toolBar")
+        layout = QHBoxLayout(bar); layout.setContentsMargins(8, 6, 8, 6); layout.setSpacing(8)
+        media_title = QLabel("Media Library"); media_title.setObjectName("bigTitle")
+        layout.addWidget(media_title); layout.addSpacing(8); layout.addWidget(self.add_files_btn); layout.addWidget(self.add_color_btn)
         for text in ["✱", "▦", "▥", "♪", "⌕", "▣"]:
-            btn = QPushButton(text)
-            btn.setObjectName("toolButton")
-            layout.addWidget(btn)
+            btn = QPushButton(text); btn.setObjectName("toolButton"); layout.addWidget(btn)
         layout.addStretch()
-        layout.addWidget(QLabel("Operation:"))
-        layout.addWidget(self.operation_combo)
-        layout.addWidget(QLabel("Codec:"))
-        layout.addWidget(self.codec_combo)
-        layout.addWidget(QLabel("CRF:"))
-        self.crf_spin.setMaximumWidth(70)
-        layout.addWidget(self.crf_spin)
-        layout.addWidget(self.voiceover_btn)
-        layout.addWidget(self.subtitles_btn)
-        aspect = QLabel("16:9 Landscape")
-        aspect.setObjectName("muted")
-        layout.addWidget(aspect)
+        layout.addWidget(QLabel("Operation:")); layout.addWidget(self.operation_combo)
+        layout.addWidget(QLabel("Codec:")); layout.addWidget(self.codec_combo)
+        layout.addWidget(QLabel("CRF:")); self.crf_spin.setMaximumWidth(70); layout.addWidget(self.crf_spin)
+        layout.addWidget(self.voiceover_btn); layout.addWidget(self.subtitles_btn)
+        aspect = QLabel("16:9 Landscape"); aspect.setObjectName("muted"); layout.addWidget(aspect)
         return bar
 
     def _build_media_library(self) -> QWidget:
-        panel = QFrame()
-        panel.setObjectName("leftPanel")
-        panel.setAcceptDrops(True)
-        layout = QVBoxLayout(panel)
-        layout.setContentsMargins(6, 6, 6, 6)
-        layout.setSpacing(6)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
+        panel = QFrame(); panel.setObjectName("leftPanel"); panel.setAcceptDrops(True)
+        layout = QVBoxLayout(panel); layout.setContentsMargins(6, 6, 6, 6); layout.setSpacing(6)
+        scroll = QScrollArea(); scroll.setWidgetResizable(True)
         self.media_grid_widget = QWidget()
         self.media_grid = QGridLayout(self.media_grid_widget)
-        self.media_grid.setContentsMargins(0, 0, 0, 0)
-        self.media_grid.setSpacing(12)
+        self.media_grid.setContentsMargins(0, 0, 0, 0); self.media_grid.setSpacing(12)
         self.media_grid.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
         scroll.setWidget(self.media_grid_widget)
         layout.addWidget(scroll)
@@ -537,153 +478,85 @@ class VideoToolWindow(QMainWindow):
         return panel
 
     def _build_export_settings_strip(self) -> QWidget:
-        box = QFrame()
-        box.setObjectName("settingsPanel")
-        layout = QGridLayout(box)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setHorizontalSpacing(8)
-        layout.setVerticalSpacing(6)
-        layout.addWidget(QLabel("Output:"), 0, 0)
-        layout.addWidget(self.output_edit, 0, 1, 1, 5)
-        layout.addWidget(self.output_btn, 0, 6)
-        layout.addWidget(QLabel("Preset:"), 1, 0)
-        layout.addWidget(self.preset_combo, 1, 1)
-        layout.addWidget(QLabel("W:"), 1, 2)
-        layout.addWidget(self.width_spin, 1, 3)
-        layout.addWidget(QLabel("H:"), 1, 4)
-        layout.addWidget(self.height_spin, 1, 5)
-        layout.addWidget(QLabel("FPS:"), 1, 6)
-        layout.addWidget(self.fps_spin, 1, 7)
-        layout.addWidget(QLabel("Start:"), 2, 0)
-        layout.addWidget(self.start_edit, 2, 1)
-        layout.addWidget(QLabel("End:"), 2, 2)
-        layout.addWidget(self.end_edit, 2, 3)
-        layout.addWidget(QLabel("Duration:"), 2, 4)
-        layout.addWidget(self.duration_edit, 2, 5)
-        layout.addWidget(QLabel("Crop X:"), 3, 0)
-        layout.addWidget(self.crop_x_spin, 3, 1)
-        layout.addWidget(QLabel("Crop Y:"), 3, 2)
-        layout.addWidget(self.crop_y_spin, 3, 3)
-        layout.addWidget(QLabel("Crop W:"), 3, 4)
-        layout.addWidget(self.crop_w_spin, 3, 5)
-        layout.addWidget(QLabel("Crop H:"), 3, 6)
-        layout.addWidget(self.crop_h_spin, 3, 7)
-        layout.addWidget(QLabel("Audio:"), 4, 0)
-        layout.addWidget(self.audio_bitrate_edit, 4, 1)
-        layout.addWidget(self.no_audio_check, 4, 2)
-        layout.addWidget(self.copy_mode_check, 4, 3)
-        layout.addWidget(self.overwrite_check, 4, 4)
+        box = QFrame(); box.setObjectName("settingsPanel")
+        layout = QGridLayout(box); layout.setContentsMargins(8, 8, 8, 8); layout.setHorizontalSpacing(8); layout.setVerticalSpacing(6)
+        mode_panel = QFrame(); mode_panel.setObjectName("modePanel")
+        mode_layout = QHBoxLayout(mode_panel); mode_layout.setContentsMargins(8, 6, 8, 6); mode_layout.setSpacing(8)
+        mode_layout.addWidget(self.mode_title_label)
+        mode_layout.addWidget(self.mode_hint_label, stretch=1)
+        mode_layout.addWidget(self.mode_primary_btn)
+        mode_layout.addWidget(self.mode_secondary_btn)
+        layout.addWidget(mode_panel, 0, 0, 1, 8)
+        layout.addWidget(QLabel("Output:"), 1, 0); layout.addWidget(self.output_edit, 1, 1, 1, 5); layout.addWidget(self.output_btn, 1, 6)
+        layout.addWidget(QLabel("Preset:"), 2, 0); layout.addWidget(self.preset_combo, 2, 1)
+        layout.addWidget(QLabel("W:"), 2, 2); layout.addWidget(self.width_spin, 2, 3)
+        layout.addWidget(QLabel("H:"), 2, 4); layout.addWidget(self.height_spin, 2, 5)
+        layout.addWidget(QLabel("FPS:"), 2, 6); layout.addWidget(self.fps_spin, 2, 7)
+        layout.addWidget(QLabel("Start:"), 3, 0); layout.addWidget(self.start_edit, 3, 1)
+        layout.addWidget(QLabel("End:"), 3, 2); layout.addWidget(self.end_edit, 3, 3)
+        layout.addWidget(QLabel("Duration:"), 3, 4); layout.addWidget(self.duration_edit, 3, 5)
+        layout.addWidget(QLabel("Crop X:"), 4, 0); layout.addWidget(self.crop_x_spin, 4, 1)
+        layout.addWidget(QLabel("Crop Y:"), 4, 2); layout.addWidget(self.crop_y_spin, 4, 3)
+        layout.addWidget(QLabel("Crop W:"), 4, 4); layout.addWidget(self.crop_w_spin, 4, 5)
+        layout.addWidget(QLabel("Crop H:"), 4, 6); layout.addWidget(self.crop_h_spin, 4, 7)
+        layout.addWidget(QLabel("Audio:"), 5, 0); layout.addWidget(self.audio_bitrate_edit, 5, 1)
+        layout.addWidget(self.no_audio_check, 5, 2); layout.addWidget(self.copy_mode_check, 5, 3); layout.addWidget(self.overwrite_check, 5, 4)
         return box
 
     def _build_preview_area(self) -> QWidget:
-        panel = QFrame()
-        panel.setObjectName("previewPanel")
-        layout = QVBoxLayout(panel)
-        layout.setContentsMargins(38, 28, 38, 18)
-        layout.setSpacing(12)
-        monitor = QFrame()
-        monitor.setObjectName("monitor")
-        monitor_layout = QVBoxLayout(monitor)
-        monitor_layout.setContentsMargins(0, 0, 0, 0)
-        monitor_layout.addWidget(self.video_widget)
+        panel = QFrame(); panel.setObjectName("previewPanel")
+        layout = QVBoxLayout(panel); layout.setContentsMargins(38, 28, 38, 18); layout.setSpacing(12)
+        monitor = QFrame(); monitor.setObjectName("monitor")
+        monitor_layout = QVBoxLayout(monitor); monitor_layout.setContentsMargins(0, 0, 0, 0); monitor_layout.addWidget(self.video_widget)
         layout.addWidget(monitor, stretch=1)
-        controls = QHBoxLayout()
-        controls.setSpacing(12)
-        controls.addWidget(self.play_btn)
-        controls.addWidget(self.time_left_label)
-        controls.addWidget(self.preview_slider, stretch=1)
-        controls.addWidget(self.time_right_label)
-        controls.addWidget(QLabel("🔊"))
-        controls.addWidget(QLabel("⛶"))
+        controls = QHBoxLayout(); controls.setSpacing(12)
+        controls.addWidget(self.play_btn); controls.addWidget(self.time_left_label); controls.addWidget(self.preview_slider, stretch=1)
+        controls.addWidget(self.time_right_label); controls.addWidget(QLabel("🔊")); controls.addWidget(QLabel("⛶"))
         layout.addLayout(controls)
-        preview_row = QHBoxLayout()
-        preview_row.addStretch()
-        preview_row.addWidget(QLabel("Preview time:"))
-        preview_row.addWidget(self.preview_time_edit)
-        update_preview_btn = QPushButton("Update thumbnail")
-        update_preview_btn.clicked.connect(self.start_preview)
-        preview_row.addWidget(update_preview_btn)
+        preview_row = QHBoxLayout(); preview_row.addStretch(); preview_row.addWidget(QLabel("Preview time:")); preview_row.addWidget(self.preview_time_edit)
+        update_preview_btn = QPushButton("Update thumbnail"); update_preview_btn.clicked.connect(self.start_preview); preview_row.addWidget(update_preview_btn)
         layout.addLayout(preview_row)
         return panel
 
     def _build_timeline_tools(self) -> QWidget:
-        bar = QFrame()
-        bar.setObjectName("timelineTools")
-        layout = QHBoxLayout(bar)
-        layout.setContentsMargins(8, 5, 8, 5)
-        layout.setSpacing(10)
-        tools = [
-            ("⚙ General", "toolButton"),
-            ("⚙ Audio", "toolButton"),
-            ("✂ Trim", "activeToolButton"),
-            ("◧ Crop", "toolButton"),
-            ("T Text", "toolButton"),
-            ("▤ Filters", "toolButton"),
-            ("▣ PiP", "toolButton"),
-            ("☻ Stickers", "toolButton"),
-            ("↔ Split", "toolButton"),
+        bar = QFrame(); bar.setObjectName("timelineTools")
+        layout = QHBoxLayout(bar); layout.setContentsMargins(8, 5, 8, 5); layout.setSpacing(10)
+        specs = [
+            ("general", "⚙ General"), ("audio", "⚙ Audio"), ("trim", "✂ Trim"), ("crop", "◧ Crop"),
+            ("text", "T Text"), ("filters", "▤ Filters"), ("pip", "▣ PiP"), ("stickers", "☻ Stickers"), ("split", "↔ Split"),
         ]
-        for text, obj in tools:
+        for mode, text in specs:
             button = QPushButton(text)
-            button.setObjectName(obj)
+            button.setObjectName("toolButton")
+            button.clicked.connect(lambda _checked=False, m=mode: self.set_editor_mode(m))
+            self.mode_buttons[mode] = button
             layout.addWidget(button)
         layout.addStretch()
-        layout.addWidget(QLabel("↶"))
-        layout.addWidget(QLabel("↷"))
-        layout.addSpacing(8)
-        layout.addWidget(self.clear_timeline_btn)
-        layout.addSpacing(12)
-        layout.addWidget(self.status_label)
-        layout.addSpacing(8)
-        layout.addWidget(self.percent_label)
-        self.progress.setMaximumWidth(220)
-        layout.addWidget(self.progress)
+        layout.addWidget(QLabel("↶")); layout.addWidget(QLabel("↷")); layout.addSpacing(8)
+        layout.addWidget(self.clear_timeline_btn); layout.addSpacing(12); layout.addWidget(self.status_label); layout.addSpacing(8); layout.addWidget(self.percent_label)
+        self.progress.setMaximumWidth(220); layout.addWidget(self.progress)
         return bar
 
     def _build_timeline_area(self) -> QWidget:
-        panel = QFrame()
-        panel.setObjectName("timelinePanel")
-        panel.setMinimumHeight(330)
-        panel.setAcceptDrops(True)
-        layout = QVBoxLayout(panel)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-
-        ruler = QFrame()
-        ruler.setObjectName("timelineRuler")
-        ruler.setFixedHeight(34)
-        ruler_layout = QHBoxLayout(ruler)
-        ruler_layout.setContentsMargins(8, 0, 8, 0)
-        ruler_layout.addWidget(QLabel("0"))
-        ruler_layout.addSpacing(160)
-        ruler_layout.addWidget(self.timeline_duration_label)
-        ruler_layout.addStretch()
+        panel = QFrame(); panel.setObjectName("timelinePanel"); panel.setMinimumHeight(330); panel.setAcceptDrops(True)
+        layout = QVBoxLayout(panel); layout.setContentsMargins(0, 0, 0, 0); layout.setSpacing(0)
+        ruler = QFrame(); ruler.setObjectName("timelineRuler"); ruler.setFixedHeight(34)
+        ruler_layout = QHBoxLayout(ruler); ruler_layout.setContentsMargins(8, 0, 8, 0)
+        ruler_layout.addWidget(QLabel("0")); ruler_layout.addSpacing(160); ruler_layout.addWidget(self.timeline_duration_label); ruler_layout.addStretch()
         layout.addWidget(ruler)
-
-        timeline_scroll = QScrollArea()
-        timeline_scroll.setWidgetResizable(False)
-        timeline_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        timeline_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        timeline_scroll = QScrollArea(); timeline_scroll.setWidgetResizable(False)
+        timeline_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded); timeline_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.timeline_canvas = TimelineCanvas()
         self.timeline_layout = QHBoxLayout(self.timeline_canvas)
-        self.timeline_layout.setContentsMargins(14, 18, 14, 14)
-        self.timeline_layout.setSpacing(12)
+        self.timeline_layout.setContentsMargins(14, 18, 14, 14); self.timeline_layout.setSpacing(12)
         self.timeline_layout.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         timeline_scroll.setWidget(self.timeline_canvas)
         layout.addWidget(timeline_scroll, stretch=1)
-
-        audio_track = QFrame()
-        audio_track.setObjectName("audioClip")
-        audio_track.setFixedHeight(44)
-        audio_layout = QHBoxLayout(audio_track)
-        audio_layout.setContentsMargins(10, 4, 10, 4)
-        audio_name = QLabel("Audio")
-        audio_name.setObjectName("trackName")
-        audio_name.setFixedWidth(70)
-        self.audio_track_label = QLabel("audio follows video clips")
-        self.audio_track_label.setObjectName("muted")
-        audio_layout.addWidget(audio_name)
-        audio_layout.addWidget(self.audio_track_label)
+        audio_track = QFrame(); audio_track.setObjectName("audioClip"); audio_track.setFixedHeight(44)
+        audio_layout = QHBoxLayout(audio_track); audio_layout.setContentsMargins(10, 4, 10, 4)
+        audio_name = QLabel("Audio"); audio_name.setObjectName("trackName"); audio_name.setFixedWidth(70)
+        self.audio_track_label = QLabel("audio follows video clips"); self.audio_track_label.setObjectName("muted")
+        audio_layout.addWidget(audio_name); audio_layout.addWidget(self.audio_track_label)
         layout.addWidget(audio_track)
         return panel
 
@@ -696,6 +569,8 @@ class VideoToolWindow(QMainWindow):
         self.clear_timeline_btn.clicked.connect(self.clear_timeline)
         self.operation_combo.currentIndexChanged.connect(self._refresh_operation_state)
         self.operation_combo.currentIndexChanged.connect(self.refresh_output_suggestion)
+        self.mode_primary_btn.clicked.connect(self.run_mode_primary_action)
+        self.mode_secondary_btn.clicked.connect(self.run_mode_secondary_action)
         self.player.positionChanged.connect(self.player_position_changed)
         self.player.durationChanged.connect(self.player_duration_changed)
         self.player.playbackStateChanged.connect(self.player_state_changed)
@@ -714,11 +589,116 @@ class VideoToolWindow(QMainWindow):
         for combo in (self.operation_combo, self.codec_combo, self.preset_combo):
             combo.view().setStyleSheet(popup_qss)
 
+    def set_editor_mode(self, mode: str) -> None:
+        if mode == "split":
+            self.split_current_clip()
+            return
+        self.current_mode = mode
+        for key, button in self.mode_buttons.items():
+            button.setObjectName("activeToolButton" if key == mode else "toolButton")
+            button.style().unpolish(button)
+            button.style().polish(button)
+        operation = MODE_TO_OPERATION.get(mode)
+        if operation:
+            self.set_operation(operation)
+        self.update_mode_panel()
+        self._refresh_operation_state()
+
+    def set_operation(self, operation: str) -> None:
+        index = self.operation_combo.findData(operation)
+        if index >= 0 and self.operation_combo.currentIndex() != index:
+            self.operation_combo.setCurrentIndex(index)
+
+    def update_mode_panel(self) -> None:
+        mode_data = {
+            "general": ("General", "Basic export/compression settings.", "Export", "Reset size"),
+            "audio": ("Audio", "Audio export mode. Use this to extract audio or mute video.", "Output .mp3", "Export audio"),
+            "trim": ("Trim", "Move the player, then set Start/End from the playhead.", "Set Start", "Set End"),
+            "crop": ("Crop", "Crop mode enables Crop X/Y/W/H and updates thumbnail preview.", "Update thumbnail", "Reset crop"),
+            "text": ("Text", "Adds a visual text marker on the timeline. Real text rendering will be added later.", "Add text marker", "Remove marker"),
+            "filters": ("Filters", "Adds a visual filter marker. Export filter pipeline is not enabled yet.", "Add filter marker", "Remove marker"),
+            "pip": ("PiP", "Adds a PiP marker for the selected clip. Real overlay export will be added later.", "Add PiP marker", "Remove marker"),
+            "stickers": ("Stickers", "Adds a sticker marker on the timeline. Real sticker rendering will be added later.", "Add sticker", "Remove marker"),
+        }
+        title, hint, primary, secondary = mode_data.get(self.current_mode, mode_data["general"])
+        self.mode_title_label.setText(title)
+        self.mode_hint_label.setText(hint)
+        self.mode_primary_btn.setText(primary)
+        self.mode_secondary_btn.setText(secondary)
+        self.status_label.setText(f"{title} mode")
+
+    def run_mode_primary_action(self) -> None:
+        mode = self.current_mode
+        if mode == "general":
+            self.start_render()
+        elif mode == "audio":
+            self.set_operation("extract_audio")
+            source = self.current_input_path or (self.timeline_paths[0] if self.timeline_paths else None)
+            if source:
+                self.output_edit.setText(str(source.with_name(source.stem + "_audio.mp3")))
+        elif mode == "trim":
+            self.start_edit.setText(self.current_player_seconds_text())
+        elif mode == "crop":
+            self.start_preview()
+        elif mode in {"text", "filters", "pip", "stickers"}:
+            self.add_visual_marker(mode)
+
+    def run_mode_secondary_action(self) -> None:
+        mode = self.current_mode
+        if mode == "general":
+            self.width_spin.setValue(0)
+            self.height_spin.setValue(0)
+            self.fps_spin.setValue(0)
+        elif mode == "audio":
+            self.set_operation("extract_audio")
+            self.start_render()
+        elif mode == "trim":
+            self.end_edit.setText(self.current_player_seconds_text())
+        elif mode == "crop":
+            self.crop_x_spin.setValue(0)
+            self.crop_y_spin.setValue(0)
+            self.crop_w_spin.setValue(1280)
+            self.crop_h_spin.setValue(720)
+            self.start_preview()
+        elif mode in {"text", "filters", "pip", "stickers"}:
+            self.remove_last_visual_marker()
+
+    def current_player_seconds_text(self) -> str:
+        return f"{self.player.position() / 1000:.3f}"
+
+    def add_visual_marker(self, mode: str) -> None:
+        self.marker_count += 1
+        label = QLabel(f"{mode.title()} marker {self.marker_count}")
+        label.setStyleSheet("background:#3a3a3a; border:2px solid #ffd400; padding:10px; font-weight:800;")
+        label.setMinimumWidth(160)
+        self.timeline_layout.insertWidget(max(0, self.timeline_layout.count() - 1), label)
+        self.status_label.setText(f"Added {mode} marker")
+
+    def remove_last_visual_marker(self) -> None:
+        for i in range(self.timeline_layout.count() - 1, -1, -1):
+            item = self.timeline_layout.itemAt(i)
+            widget = item.widget()
+            if isinstance(widget, QLabel) and "marker" in widget.text().lower():
+                self.timeline_layout.takeAt(i)
+                widget.deleteLater()
+                self.status_label.setText("Marker removed")
+                return
+
+    def split_current_clip(self) -> None:
+        if self.current_input_path is None:
+            QMessageBox.information(self, "Split", "Спочатку вибери кліп на timeline.")
+            return
+        if self.current_input_path not in self.timeline_paths:
+            self.timeline_paths.append(self.current_input_path)
+            self.rebuild_timeline()
+        index = self.timeline_paths.index(self.current_input_path)
+        self.timeline_paths.insert(index + 1, self.current_input_path)
+        self.rebuild_timeline()
+        self.status_label.setText("Split marker added. Export will join timeline clips in order.")
+        self.update_timeline_selection()
+
     def dragEnterEvent(self, event) -> None:
-        if self.paths_from_drop(event):
-            event.acceptProposedAction()
-        else:
-            event.ignore()
+        event.acceptProposedAction() if self.paths_from_drop(event) else event.ignore()
 
     def dropEvent(self, event) -> None:
         paths = self.paths_from_drop(event)
@@ -730,22 +710,16 @@ class VideoToolWindow(QMainWindow):
         data = event.mimeData()
         if not data.hasUrls():
             return []
-        paths: list[Path] = []
+        result = []
         for url in data.urls():
-            if not url.isLocalFile():
-                continue
-            path = Path(url.toLocalFile())
-            if path.is_file() and path.suffix.lower() in VIDEO_SUFFIXES:
-                paths.append(path)
-        return paths
+            if url.isLocalFile():
+                path = Path(url.toLocalFile())
+                if path.is_file() and path.suffix.lower() in VIDEO_SUFFIXES:
+                    result.append(path)
+        return result
 
     def add_files(self) -> None:
-        paths, _ = QFileDialog.getOpenFileNames(
-            self,
-            "Add video files",
-            "",
-            "Video files (*.mp4 *.mkv *.mov *.avi *.webm *.m4v);;All files (*.*)",
-        )
+        paths, _ = QFileDialog.getOpenFileNames(self, "Add video files", "", "Video files (*.mp4 *.mkv *.mov *.avi *.webm *.m4v);;All files (*.*)")
         self.add_paths([Path(raw) for raw in paths], append_to_timeline=True, select_first=True)
 
     def add_paths(self, paths: list[Path], *, append_to_timeline: bool, select_first: bool) -> None:
@@ -803,9 +777,8 @@ class VideoToolWindow(QMainWindow):
             return
         total = 0
         for index, path in enumerate(self.timeline_paths):
-            duration_text = self.duration_text(path)
             total += self.duration_seconds(path)
-            clip = TimelineClip(index, path, duration_text, self.thumb_cache.get(path))
+            clip = TimelineClip(index, path, self.duration_text(path), self.thumb_cache.get(path))
             clip.clicked.connect(self.select_timeline_clip)
             clip.remove_clicked.connect(self.remove_timeline_clip)
             self.timeline_widgets.append(clip)
