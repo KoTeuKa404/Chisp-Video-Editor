@@ -1,31 +1,20 @@
 from __future__ import annotations
 
+import os
 import re
 import shlex
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Sequence
 
 import imageio_ffmpeg
 
-
 ProgressCallback = Callable[[int], None]
 LogCallback = Callable[[str], None]
 
-
-PRESETS = (
-    "ultrafast",
-    "superfast",
-    "veryfast",
-    "faster",
-    "fast",
-    "medium",
-    "slow",
-    "slower",
-    "veryslow",
-)
-
+PRESETS = ("ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow")
 VIDEO_CODECS = ("libx264", "libx265")
 
 
@@ -34,24 +23,20 @@ class VideoJob:
     operation: str
     input_path: Path
     output_path: Path
-
+    input_paths: tuple[Path, ...] | None = None
     crf: int = 24
     preset: str = "medium"
     codec: str = "libx264"
-
     width: int | None = None
     height: int | None = None
     fps: int | None = None
-
     start: str | None = None
     end: str | None = None
     duration: str | None = None
-
     crop_x: int = 0
     crop_y: int = 0
     crop_w: int | None = None
     crop_h: int | None = None
-
     audio_bitrate: str = "128k"
     no_audio: bool = False
     copy_mode: bool = False
@@ -73,13 +58,10 @@ def format_command(cmd: Sequence[str]) -> str:
 def parse_time_to_seconds(value: str | None) -> float | None:
     if value is None:
         return None
-
     raw = value.strip()
     if not raw:
         return None
-
     parts = raw.split(":")
-
     try:
         if len(parts) == 1:
             seconds = float(parts[0])
@@ -90,11 +72,9 @@ def parse_time_to_seconds(value: str | None) -> float | None:
         else:
             raise ValueError
     except ValueError as exc:
-        raise VideoError(f"Некоректний час: {value}") from exc
-
+        raise VideoError(f"Invalid time value: {value}") from exc
     if seconds < 0:
-        raise VideoError("Час не може бути від’ємним")
-
+        raise VideoError("Time value cannot be negative")
     return seconds
 
 
@@ -104,40 +84,27 @@ def seconds_to_ffmpeg_time(seconds: float) -> str:
 
 def parse_duration_from_text(text: str) -> float:
     match = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", text)
-
     if not match:
         return 0.0
-
     hours = int(match.group(1))
     minutes = int(match.group(2))
     seconds = float(match.group(3))
-
     return hours * 3600 + minutes * 60 + seconds
 
 
 def parse_progress_time(line: str) -> float | None:
     match = re.search(r"time=(\d+):(\d+):(\d+(?:\.\d+)?)", line)
-
     if not match:
         return None
-
     hours = int(match.group(1))
     minutes = int(match.group(2))
     seconds = float(match.group(3))
-
     return hours * 3600 + minutes * 60 + seconds
 
 
 def probe_duration(input_path: Path) -> float:
-    cmd = [
-        get_ffmpeg(),
-        "-hide_banner",
-        "-i",
-        str(input_path),
-    ]
-
     proc = subprocess.run(
-        cmd,
+        [get_ffmpeg(), "-hide_banner", "-i", str(input_path)],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -146,8 +113,22 @@ def probe_duration(input_path: Path) -> float:
         check=False,
         shell=False,
     )
-
     return parse_duration_from_text(proc.stderr or proc.stdout)
+
+
+def job_input_paths(job: VideoJob) -> tuple[Path, ...]:
+    if job.input_paths:
+        return tuple(path.expanduser().resolve() for path in job.input_paths)
+    return (job.input_path.expanduser().resolve(),)
+
+
+def job_duration(job: VideoJob) -> float:
+    if job.operation == "concat":
+        total = 0.0
+        for path in job_input_paths(job):
+            total += probe_duration(path)
+        return total
+    return probe_duration(job.input_path)
 
 
 def add_faststart(args: list[str], output_path: Path) -> None:
@@ -168,40 +149,35 @@ def build_video_filters(
     include_fps: bool = True,
 ) -> list[str]:
     filters: list[str] = []
-
     if include_crop and crop_w and crop_h:
         filters.append(f"crop={crop_w}:{crop_h}:{crop_x}:{crop_y}")
-
     if width and height:
         filters.append(f"scale={width}:{height}")
     elif width:
         filters.append(f"scale={width}:-2")
     elif height:
         filters.append(f"scale=-2:{height}")
-
     if include_fps and fps:
         filters.append(f"fps={fps}")
-
     return filters
 
 
 def audio_codec_args(output_path: Path, bitrate: str) -> list[str]:
     suffix = output_path.suffix.lower()
-
     if suffix == ".wav":
         return ["-c:a", "pcm_s16le"]
-
     if suffix in {".m4a", ".aac"}:
         return ["-c:a", "aac", "-b:a", bitrate]
-
     return ["-c:a", "libmp3lame", "-b:a", bitrate]
 
 
 def normalize_job(job: VideoJob) -> VideoJob:
+    input_paths = tuple(path.expanduser().resolve() for path in job.input_paths) if job.input_paths else None
     return VideoJob(
         operation=job.operation,
         input_path=job.input_path.expanduser().resolve(),
         output_path=job.output_path.expanduser().resolve(),
+        input_paths=input_paths,
         crf=job.crf,
         preset=job.preset,
         codec=job.codec,
@@ -224,149 +200,84 @@ def normalize_job(job: VideoJob) -> VideoJob:
 
 def validate_job(job: VideoJob) -> VideoJob:
     job = normalize_job(job)
+    allowed = {"compress", "trim", "resize", "crop", "convert", "extract_audio", "mute", "thumbnail", "concat"}
+    if job.operation not in allowed:
+        raise VideoError(f"Unknown operation: {job.operation}")
 
-    if not job.input_path.is_file():
-        raise VideoError(f"Вхідний файл не знайдено: {job.input_path}")
-
-    if job.input_path == job.output_path:
-        raise VideoError("Вхідний і вихідний файл не можуть бути однаковими")
-
-    if job.operation not in {
-        "compress",
-        "trim",
-        "resize",
-        "crop",
-        "convert",
-        "extract_audio",
-        "mute",
-        "thumbnail",
-    }:
-        raise VideoError(f"Невідома операція: {job.operation}")
+    paths = job_input_paths(job)
+    if job.operation == "concat":
+        if len(paths) < 1:
+            raise VideoError("Concat requires at least one input clip")
+        for path in paths:
+            if not path.is_file():
+                raise VideoError(f"Input file not found: {path}")
+            if path == job.output_path:
+                raise VideoError("Output file cannot be the same as an input clip")
+    else:
+        if not job.input_path.is_file():
+            raise VideoError(f"Input file not found: {job.input_path}")
+        if job.input_path == job.output_path:
+            raise VideoError("Input and output file cannot be the same")
 
     if not 0 <= job.crf <= 51:
-        raise VideoError("CRF має бути від 0 до 51")
-
+        raise VideoError("CRF must be from 0 to 51")
     if job.codec not in VIDEO_CODECS:
-        raise VideoError(f"Непідтримуваний кодек: {job.codec}")
-
+        raise VideoError(f"Unsupported codec: {job.codec}")
     if job.preset not in PRESETS:
-        raise VideoError(f"Непідтримуваний preset: {job.preset}")
-
-    if job.width is not None and job.width <= 0:
-        raise VideoError("Width має бути більше 0")
-
-    if job.height is not None and job.height <= 0:
-        raise VideoError("Height має бути більше 0")
-
-    if job.fps is not None and job.fps <= 0:
-        raise VideoError("FPS має бути більше 0")
-
+        raise VideoError(f"Unsupported preset: {job.preset}")
+    for name, value in (("Width", job.width), ("Height", job.height), ("FPS", job.fps), ("Crop W", job.crop_w), ("Crop H", job.crop_h)):
+        if value is not None and value <= 0:
+            raise VideoError(f"{name} must be greater than 0")
     if job.crop_x < 0 or job.crop_y < 0:
-        raise VideoError("Crop X/Y не можуть бути від’ємними")
-
-    if job.crop_w is not None and job.crop_w <= 0:
-        raise VideoError("Crop W має бути більше 0")
-
-    if job.crop_h is not None and job.crop_h <= 0:
-        raise VideoError("Crop H має бути більше 0")
-
+        raise VideoError("Crop X/Y cannot be negative")
     if not re.fullmatch(r"\d+[kKmM]?", job.audio_bitrate.strip()):
-        raise VideoError("Audio bitrate має бути типу 128k, 192k, 1M")
+        raise VideoError("Audio bitrate must look like 128k, 192k, or 1M")
 
     parse_time_to_seconds(job.start)
     parse_time_to_seconds(job.end)
     parse_time_to_seconds(job.duration)
 
-    if job.operation == "resize":
-        if job.width is None and job.height is None and job.fps is None:
-            raise VideoError("Resize потребує Width, Height або FPS")
-
-    if job.operation == "crop":
-        if job.crop_w is None or job.crop_h is None:
-            raise VideoError("Crop потребує Crop W і Crop H")
-
+    if job.operation == "resize" and job.width is None and job.height is None and job.fps is None:
+        raise VideoError("Resize requires Width, Height, or FPS")
+    if job.operation == "crop" and (job.crop_w is None or job.crop_h is None):
+        raise VideoError("Crop requires Crop W and Crop H")
     if job.operation == "trim":
         start = parse_time_to_seconds(job.start) or 0.0
         end = parse_time_to_seconds(job.end)
         duration = parse_time_to_seconds(job.duration)
-
         if end is not None and duration is not None:
-            raise VideoError("Використовуй або End, або Duration, не обидва разом")
-
+            raise VideoError("Use either End or Duration, not both")
         if end is not None and end <= start:
-            raise VideoError("End має бути більшим за Start")
-
+            raise VideoError("End must be greater than Start")
         if duration is not None and duration <= 0:
-            raise VideoError("Duration має бути більше 0")
-
-    if job.operation == "extract_audio":
-        suffix = job.output_path.suffix.lower()
-        if suffix not in {".mp3", ".m4a", ".aac", ".wav"}:
-            raise VideoError("Для аудіо вихід має бути .mp3, .m4a, .aac або .wav")
-
-    if job.operation == "thumbnail":
-        suffix = job.output_path.suffix.lower()
-        if suffix not in {".jpg", ".jpeg", ".png", ".webp"}:
-            raise VideoError("Для кадру вихід має бути .jpg, .png або .webp")
-
-    if job.copy_mode and job.operation not in {"trim", "convert"}:
-        raise VideoError("Copy mode доступний тільки для trim і convert")
+            raise VideoError("Duration must be greater than 0")
+    if job.operation == "extract_audio" and job.output_path.suffix.lower() not in {".mp3", ".m4a", ".aac", ".wav"}:
+        raise VideoError("Audio output should be .mp3, .m4a, .aac, or .wav")
+    if job.operation == "thumbnail" and job.output_path.suffix.lower() not in {".jpg", ".jpeg", ".png", ".webp"}:
+        raise VideoError("Thumbnail output should be .jpg, .jpeg, .png, or .webp")
+    if job.copy_mode and job.operation not in {"trim", "convert", "concat"}:
+        raise VideoError("Copy mode is available only for trim, convert, and concat")
 
     job.output_path.parent.mkdir(parents=True, exist_ok=True)
-
     if job.output_path.exists() and not job.overwrite:
-        raise VideoError("Вихідний файл уже існує")
-
+        raise VideoError("Output file already exists")
     return job
 
 
 def build_command(job: VideoJob) -> list[str]:
     job = validate_job(job)
-
-    base = [
-        get_ffmpeg(),
-        "-hide_banner",
-        "-y" if job.overwrite else "-n",
-    ]
+    base = [get_ffmpeg(), "-hide_banner", "-y" if job.overwrite else "-n"]
 
     if job.operation == "compress":
-        args = [
-            "-i",
-            str(job.input_path),
-            "-map",
-            "0:v:0",
-            "-map",
-            "0:a?",
-        ]
-
-        filters = build_video_filters(
-            width=job.width,
-            height=job.height,
-            fps=job.fps,
-            include_fps=True,
-        )
-
+        args = ["-i", str(job.input_path), "-map", "0:v:0", "-map", "0:a?"]
+        filters = build_video_filters(width=job.width, height=job.height, fps=job.fps)
         if filters:
             args.extend(["-vf", ",".join(filters)])
-
-        args.extend(
-            [
-                "-c:v",
-                job.codec,
-                "-preset",
-                job.preset,
-                "-crf",
-                str(job.crf),
-                "-pix_fmt",
-                "yuv420p",
-            ]
-        )
-
+        args.extend(["-c:v", job.codec, "-preset", job.preset, "-crf", str(job.crf), "-pix_fmt", "yuv420p"])
         if job.no_audio:
             args.append("-an")
         else:
             args.extend(["-c:a", "aac", "-b:a", job.audio_bitrate])
-
         add_faststart(args, job.output_path)
         args.append(str(job.output_path))
         return base + args
@@ -375,282 +286,150 @@ def build_command(job: VideoJob) -> list[str]:
         start = parse_time_to_seconds(job.start) or 0.0
         end = parse_time_to_seconds(job.end)
         duration = parse_time_to_seconds(job.duration)
-
         if end is not None:
             duration = end - start
-
         args: list[str] = []
-
         if job.copy_mode:
             args.extend(["-ss", seconds_to_ffmpeg_time(start), "-i", str(job.input_path)])
-
             if duration is not None:
                 args.extend(["-t", seconds_to_ffmpeg_time(duration)])
-
             args.extend(["-map", "0", "-c", "copy", "-avoid_negative_ts", "make_zero"])
         else:
             args.extend(["-i", str(job.input_path), "-ss", seconds_to_ffmpeg_time(start)])
-
             if duration is not None:
                 args.extend(["-t", seconds_to_ffmpeg_time(duration)])
-
-            args.extend(
-                [
-                    "-map",
-                    "0:v:0",
-                    "-map",
-                    "0:a?",
-                    "-c:v",
-                    job.codec,
-                    "-preset",
-                    job.preset,
-                    "-crf",
-                    str(job.crf),
-                    "-pix_fmt",
-                    "yuv420p",
-                    "-c:a",
-                    "aac",
-                    "-b:a",
-                    job.audio_bitrate,
-                ]
-            )
-
+            args.extend(["-map", "0:v:0", "-map", "0:a?", "-c:v", job.codec, "-preset", job.preset, "-crf", str(job.crf), "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", job.audio_bitrate])
         add_faststart(args, job.output_path)
         args.append(str(job.output_path))
         return base + args
 
-    if job.operation == "resize":
+    if job.operation in {"resize", "crop"}:
         filters = build_video_filters(
             width=job.width,
             height=job.height,
-            fps=job.fps,
-            include_fps=True,
-        )
-
-        args = [
-            "-i",
-            str(job.input_path),
-            "-map",
-            "0:v:0",
-            "-map",
-            "0:a?",
-            "-vf",
-            ",".join(filters),
-            "-c:v",
-            job.codec,
-            "-preset",
-            job.preset,
-            "-crf",
-            str(job.crf),
-            "-pix_fmt",
-            "yuv420p",
-            "-c:a",
-            "aac",
-            "-b:a",
-            job.audio_bitrate,
-        ]
-
-        add_faststart(args, job.output_path)
-        args.append(str(job.output_path))
-        return base + args
-
-    if job.operation == "crop":
-        filters = build_video_filters(
-            width=job.width,
-            height=job.height,
+            fps=job.fps if job.operation == "resize" else None,
             crop_x=job.crop_x,
             crop_y=job.crop_y,
             crop_w=job.crop_w,
             crop_h=job.crop_h,
-            include_crop=True,
-            include_fps=False,
+            include_crop=job.operation == "crop",
         )
-
-        args = [
-            "-i",
-            str(job.input_path),
-            "-map",
-            "0:v:0",
-            "-map",
-            "0:a?",
-            "-vf",
-            ",".join(filters),
-            "-c:v",
-            job.codec,
-            "-preset",
-            job.preset,
-            "-crf",
-            str(job.crf),
-            "-pix_fmt",
-            "yuv420p",
-            "-c:a",
-            "aac",
-            "-b:a",
-            job.audio_bitrate,
-        ]
-
+        args = ["-i", str(job.input_path), "-map", "0:v:0", "-map", "0:a?", "-vf", ",".join(filters), "-c:v", job.codec, "-preset", job.preset, "-crf", str(job.crf), "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", job.audio_bitrate]
         add_faststart(args, job.output_path)
         args.append(str(job.output_path))
         return base + args
 
     if job.operation == "convert":
-        args = [
-            "-i",
-            str(job.input_path),
-            "-map",
-            "0",
-        ]
-
+        args = ["-i", str(job.input_path), "-map", "0"]
         if job.copy_mode:
             args.extend(["-c", "copy"])
         else:
-            args.extend(
-                [
-                    "-c:v",
-                    job.codec,
-                    "-preset",
-                    job.preset,
-                    "-crf",
-                    str(job.crf),
-                    "-pix_fmt",
-                    "yuv420p",
-                    "-c:a",
-                    "aac",
-                    "-b:a",
-                    job.audio_bitrate,
-                ]
-            )
-
+            args.extend(["-c:v", job.codec, "-preset", job.preset, "-crf", str(job.crf), "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", job.audio_bitrate])
         add_faststart(args, job.output_path)
         args.append(str(job.output_path))
         return base + args
 
     if job.operation == "extract_audio":
-        args = []
-
+        args: list[str] = []
         start = parse_time_to_seconds(job.start)
         duration = parse_time_to_seconds(job.duration)
-
         if start is not None:
             args.extend(["-ss", seconds_to_ffmpeg_time(start)])
-
         args.extend(["-i", str(job.input_path)])
-
         if duration is not None:
             args.extend(["-t", seconds_to_ffmpeg_time(duration)])
-
-        args.extend(["-vn", *audio_codec_args(job.output_path, job.audio_bitrate)])
-        args.append(str(job.output_path))
+        args.extend(["-vn", *audio_codec_args(job.output_path, job.audio_bitrate), str(job.output_path)])
         return base + args
 
     if job.operation == "mute":
-        args = [
-            "-i",
-            str(job.input_path),
-            "-map",
-            "0:v:0",
-            "-c:v",
-            "copy",
-            "-an",
-        ]
-
+        args = ["-i", str(job.input_path), "-map", "0:v:0", "-c:v", "copy", "-an"]
         add_faststart(args, job.output_path)
         args.append(str(job.output_path))
         return base + args
 
     if job.operation == "thumbnail":
         start = parse_time_to_seconds(job.start) or 0.0
+        return base + ["-ss", seconds_to_ffmpeg_time(start), "-i", str(job.input_path), "-frames:v", "1", "-q:v", "2", str(job.output_path)]
 
-        return base + [
-            "-ss",
-            seconds_to_ffmpeg_time(start),
-            "-i",
-            str(job.input_path),
-            "-frames:v",
-            "1",
-            "-q:v",
-            "2",
-            str(job.output_path),
-        ]
+    if job.operation == "concat":
+        raise VideoError("Concat command requires a temporary concat list. Use VideoRunner.run().")
 
-    raise VideoError(f"Невідома операція: {job.operation}")
+    raise VideoError(f"Unknown operation: {job.operation}")
+
+
+def concat_list_line(path: Path) -> str:
+    normalized = str(path.resolve()).replace("\\", "/")
+    escaped = normalized.replace("'", "'\\''")
+    return f"file '{escaped}'\n"
+
+
+def write_concat_list(paths: tuple[Path, ...]) -> Path:
+    handle = tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".ffconcat.txt", delete=False)
+    try:
+        for path in paths:
+            handle.write(concat_list_line(path))
+    finally:
+        handle.close()
+    return Path(handle.name)
+
+
+def build_concat_command(job: VideoJob, concat_file: Path) -> list[str]:
+    job = validate_job(job)
+    args = [
+        get_ffmpeg(),
+        "-hide_banner",
+        "-y" if job.overwrite else "-n",
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        str(concat_file),
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a?",
+    ]
+
+    if job.copy_mode:
+        args.extend(["-c", "copy"])
+    else:
+        filters = build_video_filters(width=job.width, height=job.height, fps=job.fps)
+        if filters:
+            args.extend(["-vf", ",".join(filters)])
+        args.extend(["-c:v", job.codec, "-preset", job.preset, "-crf", str(job.crf), "-pix_fmt", "yuv420p"])
+        if job.no_audio:
+            args.append("-an")
+        else:
+            args.extend(["-c:a", "aac", "-b:a", job.audio_bitrate])
+
+    add_faststart(args, job.output_path)
+    args.append(str(job.output_path))
+    return args
 
 
 def build_preview_command(job: VideoJob, preview_path: Path, preview_time: str | None = None) -> list[str]:
     job = normalize_job(job)
-
     if not job.input_path.is_file():
-        raise VideoError("Вибери коректний вхідний файл для прев’ю")
-
-    time_value = preview_time or job.start or "0"
-    start = parse_time_to_seconds(time_value) or 0.0
-
+        raise VideoError("Choose a valid input file for preview")
+    start = parse_time_to_seconds(preview_time or job.start or "0") or 0.0
     filters: list[str] = []
-
     if job.operation == "crop":
-        filters.extend(
-            build_video_filters(
-                width=job.width,
-                height=job.height,
-                crop_x=job.crop_x,
-                crop_y=job.crop_y,
-                crop_w=job.crop_w,
-                crop_h=job.crop_h,
-                include_crop=True,
-                include_fps=False,
-            )
-        )
+        filters = build_video_filters(width=job.width, height=job.height, crop_x=job.crop_x, crop_y=job.crop_y, crop_w=job.crop_w, crop_h=job.crop_h, include_crop=True, include_fps=False)
     elif job.operation in {"compress", "resize"}:
-        filters.extend(
-            build_video_filters(
-                width=job.width,
-                height=job.height,
-                include_fps=False,
-            )
-        )
-
-    args = [
-        get_ffmpeg(),
-        "-hide_banner",
-        "-y",
-        "-ss",
-        seconds_to_ffmpeg_time(start),
-        "-i",
-        str(job.input_path),
-    ]
-
+        filters = build_video_filters(width=job.width, height=job.height, include_fps=False)
+    args = [get_ffmpeg(), "-hide_banner", "-y", "-ss", seconds_to_ffmpeg_time(start), "-i", str(job.input_path)]
     if filters:
         args.extend(["-vf", ",".join(filters)])
-
-    args.extend(
-        [
-            "-frames:v",
-            "1",
-            "-q:v",
-            "2",
-            str(preview_path),
-        ]
-    )
-
+    args.extend(["-frames:v", "1", "-q:v", "2", str(preview_path)])
     return args
 
 
 def render_preview_frame(job: VideoJob, preview_path: Path, preview_time: str | None = None) -> None:
     cmd = build_preview_command(job, preview_path, preview_time)
-
-    proc = subprocess.run(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
-        shell=False,
-    )
-
+    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", check=False, shell=False)
     if proc.returncode != 0:
-        raise VideoError(proc.stderr.strip() or "Не вдалося створити прев’ю")
+        raise VideoError(proc.stderr.strip() or "Failed to create preview frame")
 
 
 class VideoRunner:
@@ -660,69 +439,56 @@ class VideoRunner:
 
     def cancel(self) -> None:
         self._cancelled = True
-
         if self._process and self._process.poll() is None:
             self._process.terminate()
 
-    def run(
-        self,
-        job: VideoJob,
-        *,
-        on_progress: ProgressCallback | None = None,
-        on_log: LogCallback | None = None,
-    ) -> None:
+    def run(self, job: VideoJob, *, on_progress: ProgressCallback | None = None, on_log: LogCallback | None = None) -> None:
         job = validate_job(job)
-        duration = probe_duration(job.input_path)
-        cmd = build_command(job)
+        duration = job_duration(job)
+        concat_file: Path | None = None
 
-        if on_log:
-            on_log("Command:")
-            on_log(format_command(cmd))
-            on_log("")
+        try:
+            if job.operation == "concat":
+                concat_file = write_concat_list(job_input_paths(job))
+                cmd = build_concat_command(job, concat_file)
+            else:
+                cmd = build_command(job)
 
-        self._cancelled = False
+            if on_log:
+                on_log("Command:")
+                on_log(format_command(cmd))
+                on_log("")
 
-        self._process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            shell=False,
-        )
+            self._cancelled = False
+            self._process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", shell=False)
+            assert self._process.stderr is not None
 
-        assert self._process.stderr is not None
+            last_progress = -1
+            for line in self._process.stderr:
+                line = line.rstrip()
+                if on_log and line:
+                    on_log(line)
+                if duration > 0 and on_progress:
+                    current = parse_progress_time(line)
+                    if current is not None:
+                        progress = int(min(100, max(0, current / duration * 100)))
+                        if progress != last_progress:
+                            last_progress = progress
+                            on_progress(progress)
 
-        last_progress = -1
-
-        for line in self._process.stderr:
-            line = line.rstrip()
-
-            if on_log and line:
-                on_log(line)
-
-            if duration > 0 and on_progress:
-                current = parse_progress_time(line)
-
-                if current is not None:
-                    progress = int(min(100, max(0, current / duration * 100)))
-
-                    if progress != last_progress:
-                        last_progress = progress
-                        on_progress(progress)
-
-        code = self._process.wait()
-
-        if self._cancelled:
-            raise VideoError("Операцію скасовано")
-
-        if code != 0:
-            raise VideoError(f"FFmpeg завершився з кодом {code}")
-
-        if on_progress:
-            on_progress(100)
-
-        if on_log:
-            on_log("")
-            on_log(f"Saved: {job.output_path}")
+            code = self._process.wait()
+            if self._cancelled:
+                raise VideoError("Operation cancelled")
+            if code != 0:
+                raise VideoError(f"FFmpeg exited with code {code}")
+            if on_progress:
+                on_progress(100)
+            if on_log:
+                on_log("")
+                on_log(f"Saved: {job.output_path}")
+        finally:
+            if concat_file is not None:
+                try:
+                    os.unlink(concat_file)
+                except OSError:
+                    pass
