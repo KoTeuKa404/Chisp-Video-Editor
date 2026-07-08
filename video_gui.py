@@ -4,8 +4,8 @@ import sys
 import tempfile
 from pathlib import Path
 
-from PyQt6.QtCore import QObject, QThread, Qt, QUrl, pyqtSignal
-from PyQt6.QtGui import QColor, QPainter, QPen, QPixmap
+from PyQt6.QtCore import QObject, QRect, QThread, Qt, QUrl, pyqtSignal
+from PyQt6.QtGui import QColor, QMouseEvent, QPainter, QPen, QPixmap
 from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PyQt6.QtMultimediaWidgets import QVideoWidget
 from PyQt6.QtWidgets import (
@@ -72,7 +72,6 @@ QFrame#topBar { background: #2b2b2b; border-bottom: 1px solid #454545; }
 QFrame#toolBar { background: #303030; border-bottom: 1px solid #4b4b4b; }
 QFrame#leftPanel { background: #3f3f3f; border-right: 1px solid #505050; }
 QFrame#previewPanel { background: #5a5a5a; border-left: 1px solid #444444; }
-QFrame#trimWorkspace { background: #5a5a5a; }
 QFrame#trimHeader { background: #2b2b2b; border-bottom: 1px solid #454545; }
 QFrame#trimBody { background: #5a5a5a; }
 QFrame#timelinePanel { background: #202020; border-top: 1px solid #4a4a4a; }
@@ -90,7 +89,7 @@ QFrame#timelineClipItem { background: #000000; border: 4px solid #ffd400; }
 QFrame#timelineClipItem[selected="true"] { border: 5px solid #ffd400; background: #050505; }
 QFrame#audioClip { background: #5d43c9; border: 2px solid #ffd400; }
 QLabel#title { font-size: 14px; font-weight: 700; color: #ffffff; }
-QLabel#trimTitle { font-size: 26px; color: #ffffff; }
+QLabel#trimTitle { font-size: 27px; color: #ffffff; }
 QLabel#mediaTitle { color: #ffffff; font-size: 12px; font-weight: 800; }
 QLabel#mediaDuration { background: #000000; color: #ffffff; padding: 2px 5px; border-radius: 3px; }
 QLabel#muted { color: #bbbbbb; }
@@ -98,7 +97,6 @@ QLabel#modeTitle { color: #ffd400; font-size: 14px; font-weight: 900; }
 QLabel#bigTitle { font-size: 27px; color: #ffffff; }
 QLabel#timelineTime { color: #ffffff; font-weight: 700; }
 QLabel#trackName { color: #ffffff; font-weight: 800; }
-QLabel#trimTag { background: #ffd400; color: #111111; padding: 4px 7px; border-radius: 4px; font-weight: 800; }
 QLineEdit, QSpinBox { background: #191919; color: #ffffff; border: 1px solid #555555; border-radius: 2px; padding: 5px 7px; min-height: 22px; }
 QLineEdit:focus, QSpinBox:focus { border: 1px solid #ffd400; }
 QLineEdit:disabled, QSpinBox:disabled { background: #242424; color: #808080; border: 1px solid #3b3b3b; }
@@ -134,8 +132,6 @@ QProgressBar { background: #111111; border: 1px solid #555555; height: 12px; tex
 QProgressBar::chunk { background: #ffd400; }
 QSlider::groove:horizontal { height: 4px; background: #c8c8c8; }
 QSlider::handle:horizontal { width: 16px; height: 16px; margin: -6px 0; border-radius: 8px; background: #ffffff; }
-QSlider#trimRange::groove:horizontal { height: 5px; background: #ffd400; }
-QSlider#trimRange::handle:horizontal { width: 18px; height: 18px; margin: -7px 0; border-radius: 9px; background: #5a5a5a; border: 3px solid #ffd400; }
 QScrollArea { background: transparent; border: none; }
 QScrollArea QWidget { background: transparent; }
 QScrollBar:vertical { background: #333333; width: 10px; }
@@ -147,7 +143,6 @@ QScrollBar::handle:horizontal { background: #777777; min-width: 30px; }
 
 class RenderWorker(QObject):
     progress = pyqtSignal(int)
-    log = pyqtSignal(str)
     finished = pyqtSignal()
     failed = pyqtSignal(str)
 
@@ -158,7 +153,7 @@ class RenderWorker(QObject):
 
     def run(self) -> None:
         try:
-            self.runner.run(self.job, on_progress=self.progress.emit, on_log=self.log.emit)
+            self.runner.run(self.job, on_progress=self.progress.emit, on_log=None)
         except Exception as exc:
             self.failed.emit(str(exc))
         finally:
@@ -215,8 +210,139 @@ class TimelineCanvas(QFrame):
         painter.drawEllipse(-8, -8, 22, 22)
 
 
+class TrimRangeBar(QWidget):
+    startChanged = pyqtSignal(int)
+    endChanged = pyqtSignal(int)
+    seekRequested = pyqtSignal(int)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.duration = 0
+        self.start_value = 0
+        self.end_value = 0
+        self.position = 0
+        self.drag_target: str | None = None
+        self.setMinimumHeight(54)
+        self.setMouseTracking(True)
+
+    def set_duration(self, duration: int) -> None:
+        self.duration = max(0, duration)
+        self.start_value = max(0, min(self.start_value, self.duration))
+        self.end_value = self.duration if self.end_value <= 0 else max(self.start_value, min(self.end_value, self.duration))
+        self.position = max(0, min(self.position, self.duration))
+        self.update()
+
+    def set_position(self, position: int) -> None:
+        self.position = max(0, min(position, self.duration))
+        self.update()
+
+    def set_range_values(self, start: int, end: int) -> None:
+        start = max(0, min(start, self.duration))
+        end = max(start, min(end, self.duration))
+        self.start_value = start
+        self.end_value = end
+        self.update()
+
+    def bar_rect(self) -> QRect:
+        return QRect(12, 24, max(1, self.width() - 24), 16)
+
+    def value_to_x(self, value: int) -> int:
+        rect = self.bar_rect()
+        if self.duration <= 0:
+            return rect.left()
+        return rect.left() + int(rect.width() * value / self.duration)
+
+    def x_to_value(self, x: int) -> int:
+        rect = self.bar_rect()
+        x = max(rect.left(), min(x, rect.right()))
+        if rect.width() <= 0 or self.duration <= 0:
+            return 0
+        return int((x - rect.left()) / rect.width() * self.duration)
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        rect = self.bar_rect()
+        y = rect.center().y()
+        sx = self.value_to_x(self.start_value)
+        ex = self.value_to_x(self.end_value)
+        px = self.value_to_x(self.position)
+
+        painter.setPen(QPen(QColor("#bdbdbd"), 3))
+        painter.drawLine(rect.left(), y, rect.right(), y)
+        painter.setPen(QPen(QColor("#ffd400"), 4))
+        painter.drawLine(sx, y, ex, y)
+
+        painter.setPen(QPen(QColor("#ffd400"), 3))
+        painter.setBrush(QColor("#5a5a5a"))
+        painter.drawEllipse(sx - 9, y - 9, 18, 18)
+        painter.drawLine(ex, y - 16, ex, y + 16)
+        painter.drawLine(ex - 3, y - 16, ex + 3, y - 16)
+        painter.drawLine(ex - 3, y + 16, ex + 3, y + 16)
+
+        painter.setPen(QPen(QColor("#ffd400"), 2))
+        painter.drawLine(px, y - 15, px, y + 15)
+
+        self.draw_tag(painter, sx, 0, self.format_msec(self.start_value))
+        self.draw_tag(painter, ex, 0, self.format_msec(self.end_value))
+
+    def draw_tag(self, painter: QPainter, x: int, y: int, text: str) -> None:
+        width = 66
+        left = max(0, min(x - width // 2, self.width() - width))
+        rect = QRect(left, y, width, 22)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor("#ffd400"))
+        painter.drawRoundedRect(rect, 4, 4)
+        painter.setPen(QColor("#111111"))
+        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if self.duration <= 0:
+            return
+        x = int(event.position().x())
+        sx = self.value_to_x(self.start_value)
+        ex = self.value_to_x(self.end_value)
+        if abs(x - sx) <= 16:
+            self.drag_target = "start"
+        elif abs(x - ex) <= 16:
+            self.drag_target = "end"
+        else:
+            self.drag_target = "position"
+            value = self.x_to_value(x)
+            self.position = value
+            self.seekRequested.emit(value)
+            self.update()
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        if not self.drag_target or self.duration <= 0:
+            return
+        value = self.x_to_value(int(event.position().x()))
+        if self.drag_target == "start":
+            value = min(value, self.end_value)
+            self.start_value = value
+            self.startChanged.emit(value)
+        elif self.drag_target == "end":
+            value = max(value, self.start_value)
+            self.end_value = value
+            self.endChanged.emit(value)
+        else:
+            self.position = value
+            self.seekRequested.emit(value)
+        self.update()
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        self.drag_target = None
+
+    def format_msec(self, msec: int) -> str:
+        total = max(0, msec) / 1000
+        minutes = int(total // 60)
+        seconds = total % 60
+        return f"{minutes:02d}:{seconds:04.1f}"
+
+
 class MediaCard(QFrame):
-    clicked = pyqtSignal(Path)
+    clicked = pyqtSignal(object)
 
     def __init__(self, path: Path, duration_text: str) -> None:
         super().__init__()
@@ -230,7 +356,6 @@ class MediaCard(QFrame):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(5)
-
         self.thumb_frame = QFrame()
         self.thumb_frame.setObjectName("mediaThumb")
         self.thumb_frame.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
@@ -241,14 +366,12 @@ class MediaCard(QFrame):
         self.thumb_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.thumb_label.setObjectName("muted")
         thumb_layout.addWidget(self.thumb_label)
-
-        title = QLabel(self._short_name(path.stem))
+        title = QLabel(self.short_name(path.stem))
         title.setObjectName("mediaTitle")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         duration = QLabel(duration_text)
         duration.setObjectName("mediaDuration")
         duration.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
         layout.addWidget(self.thumb_frame)
         layout.addWidget(title)
         layout.addWidget(duration, alignment=Qt.AlignmentFlag.AlignRight)
@@ -269,7 +392,7 @@ class MediaCard(QFrame):
         self.thumb_label.setPixmap(scaled)
         self.thumb_label.setText("")
 
-    def _short_name(self, value: str, limit: int = 19) -> str:
+    def short_name(self, value: str, limit: int = 19) -> str:
         return value if len(value) <= limit else value[: limit - 1] + "…"
 
 
@@ -285,7 +408,6 @@ class TimelineClip(QFrame):
         self.setProperty("selected", False)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setFixedSize(185, 260)
-
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(6)
@@ -297,13 +419,11 @@ class TimelineClip(QFrame):
         close.clicked.connect(lambda: self.remove_clicked.emit(self.index))
         top.addWidget(close)
         root.addLayout(top)
-
         self.thumb = QLabel("")
         self.thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.thumb.setMinimumHeight(125)
         self.thumb.setStyleSheet("background:#000000;")
         root.addWidget(self.thumb, stretch=1)
-
         title = QLabel(path.name)
         title.setObjectName("mediaTitle")
         title.setWordWrap(True)
@@ -347,7 +467,6 @@ class VideoToolWindow(QMainWindow):
         self.normal_mode_buttons: dict[str, QPushButton] = {}
         self.trim_mode_buttons: dict[str, QPushButton] = {}
         self.marker_count = 0
-
         self.render_thread: QThread | None = None
         self.render_worker: RenderWorker | None = None
         self.preview_thread: QThread | None = None
@@ -355,7 +474,7 @@ class VideoToolWindow(QMainWindow):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.thumb_cache: dict[Path, QPixmap] = {}
         self.slider_is_pressed = False
-        self.syncing_trim_sliders = False
+        self.setting_trim_range = False
 
         self.setWindowTitle("Chisp Video Editor")
         self.setMinimumSize(1180, 720)
@@ -377,14 +496,14 @@ class VideoToolWindow(QMainWindow):
         self.subtitles_btn = QPushButton("CC Subtitles"); self.subtitles_btn.setObjectName("toolButton")
         self.export_btn = QPushButton("Export video"); self.export_btn.setObjectName("yellowButton")
         self.cancel_btn = QPushButton("Cancel"); self.cancel_btn.setObjectName("dangerButton"); self.cancel_btn.setEnabled(False)
-        self.clear_timeline_btn = QPushButton("✕ Clear timeline"); self.clear_timeline_btn.setObjectName("toolButton")
+        self.normal_clear_timeline_btn = QPushButton("✕ Clear timeline"); self.normal_clear_timeline_btn.setObjectName("toolButton")
+        self.trim_clear_timeline_btn = QPushButton("✕ Clear timeline"); self.trim_clear_timeline_btn.setObjectName("toolButton")
 
         self.operation_combo = QComboBox()
         for key, label in OPERATION_LABELS.items():
             self.operation_combo.addItem(label, key)
         self.codec_combo = QComboBox(); self.codec_combo.addItems(VIDEO_CODECS)
         self.preset_combo = QComboBox(); self.preset_combo.addItems(PRESETS); self.preset_combo.setCurrentText("medium")
-
         self.crf_spin = QSpinBox(); self.crf_spin.setRange(0, 51); self.crf_spin.setValue(24)
         self.width_spin = QSpinBox(); self.width_spin.setRange(0, 16000); self.width_spin.setSpecialValueText("Source"); self.width_spin.setValue(0)
         self.height_spin = QSpinBox(); self.height_spin.setRange(0, 16000); self.height_spin.setSpecialValueText("Source"); self.height_spin.setValue(0)
@@ -393,7 +512,6 @@ class VideoToolWindow(QMainWindow):
         self.crop_y_spin = QSpinBox(); self.crop_y_spin.setRange(0, 16000)
         self.crop_w_spin = QSpinBox(); self.crop_w_spin.setRange(0, 16000); self.crop_w_spin.setValue(1280)
         self.crop_h_spin = QSpinBox(); self.crop_h_spin.setRange(0, 16000); self.crop_h_spin.setValue(720)
-
         self.start_edit = QLineEdit("0")
         self.end_edit = QLineEdit(); self.end_edit.setPlaceholderText("End")
         self.duration_edit = QLineEdit(); self.duration_edit.setPlaceholderText("Duration")
@@ -414,20 +532,19 @@ class VideoToolWindow(QMainWindow):
         self.play_btn = QPushButton("▶"); self.play_btn.setObjectName("playButton")
         self.trim_play_btn = QPushButton("▶"); self.trim_play_btn.setObjectName("playButton")
         self.preview_slider = QSlider(Qt.Orientation.Horizontal); self.preview_slider.setRange(0, 0)
-        self.trim_preview_slider = QSlider(Qt.Orientation.Horizontal); self.trim_preview_slider.setRange(0, 0)
-        self.trim_start_slider = QSlider(Qt.Orientation.Horizontal); self.trim_start_slider.setObjectName("trimRange"); self.trim_start_slider.setRange(0, 0)
-        self.trim_end_slider = QSlider(Qt.Orientation.Horizontal); self.trim_end_slider.setObjectName("trimRange"); self.trim_end_slider.setRange(0, 0)
-        self.trim_start_tag = QLabel("00:00.0"); self.trim_start_tag.setObjectName("trimTag")
-        self.trim_end_tag = QLabel("00:00.0"); self.trim_end_tag.setObjectName("trimTag")
+        self.trim_range_bar = TrimRangeBar()
         self.time_left_label = QLabel("00:00.0"); self.time_left_label.setObjectName("muted")
         self.time_right_label = QLabel("00:00"); self.time_right_label.setObjectName("muted")
         self.trim_time_left_label = QLabel("00:00.0"); self.trim_time_left_label.setObjectName("muted")
         self.trim_time_right_label = QLabel("00:00"); self.trim_time_right_label.setObjectName("muted")
         self.done_trim_btn = QPushButton("Done"); self.done_trim_btn.setObjectName("doneButton")
         self.back_trim_btn = QPushButton("←"); self.back_trim_btn.setObjectName("backButton")
-        self.progress = QProgressBar(); self.progress.setValue(0)
-        self.status_label = QLabel("Ready"); self.status_label.setObjectName("muted")
-        self.percent_label = QLabel("0%"); self.percent_label.setObjectName("muted")
+        self.normal_status_label = QLabel("Ready"); self.normal_status_label.setObjectName("muted")
+        self.trim_status_label = QLabel("Ready"); self.trim_status_label.setObjectName("muted")
+        self.normal_percent_label = QLabel("0%"); self.normal_percent_label.setObjectName("muted")
+        self.trim_percent_label = QLabel("0%"); self.trim_percent_label.setObjectName("muted")
+        self.normal_progress = QProgressBar(); self.normal_progress.setValue(0)
+        self.trim_progress = QProgressBar(); self.trim_progress.setValue(0)
         self.timeline_duration_label = QLabel(""); self.timeline_duration_label.setObjectName("timelineTime")
         self.trim_timeline_duration_label = QLabel(""); self.trim_timeline_duration_label.setObjectName("timelineTime")
 
@@ -457,7 +574,7 @@ class VideoToolWindow(QMainWindow):
         center_splitter.addWidget(self._build_preview_area())
         center_splitter.setSizes([820, 780])
         main.addWidget(center_splitter, stretch=1)
-        main.addWidget(self._build_timeline_tools(self.normal_mode_buttons))
+        main.addWidget(self._build_timeline_tools(self.normal_mode_buttons, self.normal_clear_timeline_btn, self.normal_status_label, self.normal_percent_label, self.normal_progress))
         main.addWidget(self._build_timeline_area(is_trim=False))
         return root
 
@@ -542,47 +659,34 @@ class VideoToolWindow(QMainWindow):
         layout = QVBoxLayout(root)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-
         header = QFrame(); header.setObjectName("trimHeader")
         header_layout = QHBoxLayout(header); header_layout.setContentsMargins(0, 0, 10, 0); header_layout.setSpacing(10)
         header_layout.addWidget(self.back_trim_btn)
         title = QLabel("Trim"); title.setObjectName("trimTitle")
-        header_layout.addWidget(title)
-        header_layout.addStretch()
+        header_layout.addWidget(title); header_layout.addStretch()
         layout.addWidget(header)
 
         body = QFrame(); body.setObjectName("trimBody")
-        body_layout = QVBoxLayout(body); body_layout.setContentsMargins(22, 18, 22, 12); body_layout.setSpacing(12)
+        body_layout = QVBoxLayout(body); body_layout.setContentsMargins(22, 18, 22, 12); body_layout.setSpacing(10)
         monitor_row = QHBoxLayout(); monitor_row.addStretch()
         monitor = QFrame(); monitor.setObjectName("monitor"); monitor.setMinimumSize(700, 390)
         monitor_layout = QVBoxLayout(monitor); monitor_layout.setContentsMargins(0, 0, 0, 0); monitor_layout.addWidget(self.trim_video_widget)
         monitor_row.addWidget(monitor, stretch=3); monitor_row.addStretch()
         body_layout.addLayout(monitor_row, stretch=1)
-
-        controls = QHBoxLayout(); controls.setSpacing(12)
-        controls.addWidget(self.trim_play_btn)
-        controls.addWidget(self.trim_time_left_label)
-        controls.addWidget(self.trim_preview_slider, stretch=1)
-        controls.addWidget(self.trim_time_right_label)
-        controls.addWidget(QLabel("🔊"))
-        controls.addWidget(self.done_trim_btn)
-        body_layout.addLayout(controls)
-
-        range_layout = QGridLayout(); range_layout.setHorizontalSpacing(10); range_layout.setVerticalSpacing(4)
-        range_layout.addWidget(QLabel("Start"), 0, 0)
-        range_layout.addWidget(self.trim_start_tag, 0, 1)
-        range_layout.addWidget(self.trim_start_slider, 0, 2)
-        range_layout.addWidget(QLabel("End"), 1, 0)
-        range_layout.addWidget(self.trim_end_tag, 1, 1)
-        range_layout.addWidget(self.trim_end_slider, 1, 2)
-        body_layout.addLayout(range_layout)
+        strip = QHBoxLayout(); strip.setContentsMargins(0, 0, 0, 0); strip.setSpacing(12)
+        strip.addWidget(self.trim_play_btn)
+        strip.addWidget(self.trim_time_left_label)
+        strip.addWidget(self.trim_range_bar, stretch=1)
+        strip.addWidget(self.trim_time_right_label)
+        strip.addWidget(QLabel("🔊"))
+        strip.addWidget(self.done_trim_btn)
+        body_layout.addLayout(strip)
         layout.addWidget(body, stretch=1)
-
-        layout.addWidget(self._build_timeline_tools(self.trim_mode_buttons))
+        layout.addWidget(self._build_timeline_tools(self.trim_mode_buttons, self.trim_clear_timeline_btn, self.trim_status_label, self.trim_percent_label, self.trim_progress))
         layout.addWidget(self._build_timeline_area(is_trim=True))
         return root
 
-    def _build_timeline_tools(self, target: dict[str, QPushButton]) -> QWidget:
+    def _build_timeline_tools(self, target: dict[str, QPushButton], clear_button: QPushButton, status_label: QLabel, percent_label: QLabel, progress: QProgressBar) -> QWidget:
         bar = QFrame(); bar.setObjectName("timelineTools")
         layout = QHBoxLayout(bar); layout.setContentsMargins(8, 5, 8, 5); layout.setSpacing(10)
         specs = [
@@ -598,8 +702,8 @@ class VideoToolWindow(QMainWindow):
             layout.addWidget(button)
         layout.addStretch()
         layout.addWidget(QLabel("↶")); layout.addWidget(QLabel("↷")); layout.addSpacing(8)
-        layout.addWidget(self.clear_timeline_btn); layout.addSpacing(12); layout.addWidget(self.status_label); layout.addSpacing(8); layout.addWidget(self.percent_label)
-        self.progress.setMaximumWidth(220); layout.addWidget(self.progress)
+        layout.addWidget(clear_button); layout.addSpacing(12); layout.addWidget(status_label); layout.addSpacing(8); layout.addWidget(percent_label)
+        progress.setMaximumWidth(220); layout.addWidget(progress)
         return bar
 
     def _build_timeline_area(self, *, is_trim: bool) -> QWidget:
@@ -610,7 +714,6 @@ class VideoToolWindow(QMainWindow):
         duration_label = self.trim_timeline_duration_label if is_trim else self.timeline_duration_label
         ruler_layout.addWidget(QLabel("0")); ruler_layout.addSpacing(160); ruler_layout.addWidget(duration_label); ruler_layout.addStretch()
         layout.addWidget(ruler)
-
         timeline_scroll = QScrollArea(); timeline_scroll.setWidgetResizable(False)
         timeline_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded); timeline_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         canvas = TimelineCanvas()
@@ -619,14 +722,12 @@ class VideoToolWindow(QMainWindow):
         clip_layout.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         timeline_scroll.setWidget(canvas)
         layout.addWidget(timeline_scroll, stretch=1)
-
         audio_track = QFrame(); audio_track.setObjectName("audioClip"); audio_track.setFixedHeight(44)
         audio_layout = QHBoxLayout(audio_track); audio_layout.setContentsMargins(10, 4, 10, 4)
         audio_name = QLabel("Audio"); audio_name.setObjectName("trackName"); audio_name.setFixedWidth(70)
         audio_label = QLabel("audio follows video clips"); audio_label.setObjectName("muted")
         audio_layout.addWidget(audio_name); audio_layout.addWidget(audio_label)
         layout.addWidget(audio_track)
-
         if is_trim:
             self.trim_timeline_canvas = canvas
             self.trim_timeline_layout = clip_layout
@@ -644,7 +745,8 @@ class VideoToolWindow(QMainWindow):
         self.output_btn.clicked.connect(self.choose_output_file)
         self.play_btn.clicked.connect(self.play_pause)
         self.trim_play_btn.clicked.connect(self.play_pause)
-        self.clear_timeline_btn.clicked.connect(self.clear_timeline)
+        self.normal_clear_timeline_btn.clicked.connect(self.clear_timeline)
+        self.trim_clear_timeline_btn.clicked.connect(self.clear_timeline)
         self.back_trim_btn.clicked.connect(self.exit_mode)
         self.done_trim_btn.clicked.connect(self.exit_mode)
         self.operation_combo.currentIndexChanged.connect(self._refresh_operation_state)
@@ -655,12 +757,12 @@ class VideoToolWindow(QMainWindow):
         self.player.durationChanged.connect(self.player_duration_changed)
         self.player.playbackStateChanged.connect(self.player_state_changed)
         self.player.errorOccurred.connect(self.player_error)
-        for slider in (self.preview_slider, self.trim_preview_slider):
-            slider.sliderPressed.connect(self.slider_pressed)
-            slider.sliderReleased.connect(self.slider_released)
-            slider.sliderMoved.connect(self.seek_video)
-        self.trim_start_slider.valueChanged.connect(self.trim_start_changed)
-        self.trim_end_slider.valueChanged.connect(self.trim_end_changed)
+        self.preview_slider.sliderPressed.connect(self.slider_pressed)
+        self.preview_slider.sliderReleased.connect(self.slider_released)
+        self.preview_slider.sliderMoved.connect(self.seek_video)
+        self.trim_range_bar.seekRequested.connect(self.player.setPosition)
+        self.trim_range_bar.startChanged.connect(self.trim_start_changed)
+        self.trim_range_bar.endChanged.connect(self.trim_end_changed)
 
     def _style_combo_popups(self) -> None:
         popup_qss = """
@@ -700,9 +802,9 @@ class VideoToolWindow(QMainWindow):
         self.set_operation("trim")
         self.player.setVideoOutput(self.trim_video_widget)
         self.stack.setCurrentWidget(self.trim_page)
-        self.sync_trim_controls_from_fields()
+        self.sync_trim_range_from_fields()
         self.update_mode_buttons()
-        self.status_label.setText("Trim mode")
+        self.set_status("Trim mode")
 
     def exit_mode(self) -> None:
         self.current_mode = None
@@ -710,7 +812,7 @@ class VideoToolWindow(QMainWindow):
         self.player.setVideoOutput(self.normal_video_widget)
         self.mode_panel.setVisible(False)
         self.update_mode_buttons()
-        self.status_label.setText("Ready")
+        self.set_status("Ready")
 
     def keyPressEvent(self, event) -> None:
         if event.key() == Qt.Key.Key_Escape:
@@ -745,7 +847,7 @@ class VideoToolWindow(QMainWindow):
         self.mode_hint_label.setText(hint)
         self.mode_primary_btn.setText(primary)
         self.mode_secondary_btn.setText(secondary)
-        self.status_label.setText(f"{title} mode" if title else "Ready")
+        self.set_status(f"{title} mode" if title else "Ready")
 
     def run_mode_primary_action(self) -> None:
         mode = self.current_mode
@@ -779,7 +881,7 @@ class VideoToolWindow(QMainWindow):
         label.setStyleSheet("background:#3a3a3a; border:2px solid #ffd400; padding:10px; font-weight:800;")
         label.setMinimumWidth(160)
         self.timeline_layout.insertWidget(max(0, self.timeline_layout.count() - 1), label)
-        self.status_label.setText(f"Added {mode} marker")
+        self.set_status(f"Added {mode} marker")
 
     def remove_last_visual_marker(self) -> None:
         for i in range(self.timeline_layout.count() - 1, -1, -1):
@@ -788,7 +890,7 @@ class VideoToolWindow(QMainWindow):
             if isinstance(widget, QLabel) and "marker" in widget.text().lower():
                 self.timeline_layout.takeAt(i)
                 widget.deleteLater()
-                self.status_label.setText("Marker removed")
+                self.set_status("Marker removed")
                 return
 
     def split_current_clip(self) -> None:
@@ -800,7 +902,7 @@ class VideoToolWindow(QMainWindow):
         index = self.timeline_paths.index(self.current_input_path)
         self.timeline_paths.insert(index + 1, self.current_input_path)
         self.rebuild_timeline()
-        self.status_label.setText("Split marker added. Export will join timeline clips in order.")
+        self.set_status("Split marker added. Export will join timeline clips in order.")
         self.update_timeline_selection()
 
     def dragEnterEvent(self, event) -> None:
@@ -914,9 +1016,7 @@ class VideoToolWindow(QMainWindow):
         self.time_right_label.setText("00:00")
         self.trim_time_right_label.setText("00:00")
         self.preview_slider.setRange(0, 0)
-        self.trim_preview_slider.setRange(0, 0)
-        self.trim_start_slider.setRange(0, 0)
-        self.trim_end_slider.setRange(0, 0)
+        self.trim_range_bar.set_duration(0)
 
     def select_media(self, path: Path) -> None:
         self.current_input_path = path
@@ -961,7 +1061,6 @@ class VideoToolWindow(QMainWindow):
         self.time_right_label.setText(text)
         self.trim_time_right_label.setText(text)
         self.preview_slider.setValue(0)
-        self.trim_preview_slider.setValue(0)
 
     def play_pause(self) -> None:
         if self.current_input_path is None:
@@ -971,8 +1070,14 @@ class VideoToolWindow(QMainWindow):
             self.load_player(self.current_input_path)
         if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
             self.player.pause()
-        else:
-            self.player.play()
+            return
+        if self.current_mode == "trim":
+            start = self.trim_range_bar.start_value
+            end = self.trim_range_bar.end_value
+            pos = self.player.position()
+            if end > start and (pos < start or pos >= end):
+                self.player.setPosition(start)
+        self.player.play()
 
     def player_state_changed(self, state: QMediaPlayer.PlaybackState) -> None:
         text = "⏸" if state == QMediaPlayer.PlaybackState.PlayingState else "▶"
@@ -982,27 +1087,32 @@ class VideoToolWindow(QMainWindow):
     def player_position_changed(self, position: int) -> None:
         if not self.slider_is_pressed:
             self.preview_slider.setValue(position)
-            self.trim_preview_slider.setValue(position)
+        self.trim_range_bar.set_position(position)
         label = self.format_msec(position, with_tenths=True)
         self.time_left_label.setText(label)
         self.trim_time_left_label.setText(label)
+        if self.current_mode == "trim" and self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            end = self.trim_range_bar.end_value
+            start = self.trim_range_bar.start_value
+            if end > start and position >= end:
+                self.player.pause()
+                self.player.setPosition(start)
 
     def player_duration_changed(self, duration: int) -> None:
         duration = max(0, duration)
         self.preview_slider.setRange(0, duration)
-        self.trim_preview_slider.setRange(0, duration)
-        self.trim_start_slider.setRange(0, duration)
-        self.trim_end_slider.setRange(0, duration)
-        self.trim_end_slider.setValue(duration)
+        self.trim_range_bar.set_duration(duration)
         if duration > 0:
             text = self.format_msec(duration)
             self.time_right_label.setText(text)
             self.trim_time_right_label.setText(text)
-            self.trim_end_tag.setText(self.format_msec(duration, with_tenths=True))
+            if not self.end_edit.text().strip():
+                self.end_edit.setText(f"{duration / 1000:.3f}")
+            self.sync_trim_range_from_fields()
 
     def player_error(self, _error, error_string: str) -> None:
         if error_string:
-            self.status_label.setText("Playback error")
+            self.set_status("Playback error")
             QMessageBox.warning(self, "Playback error", error_string)
 
     def slider_pressed(self) -> None:
@@ -1010,8 +1120,7 @@ class VideoToolWindow(QMainWindow):
 
     def slider_released(self) -> None:
         self.slider_is_pressed = False
-        value = self.sender().value() if isinstance(self.sender(), QSlider) else self.preview_slider.value()
-        self.player.setPosition(value)
+        self.player.setPosition(self.preview_slider.value())
 
     def seek_video(self, value: int) -> None:
         label = self.format_msec(value, with_tenths=True)
@@ -1019,39 +1128,25 @@ class VideoToolWindow(QMainWindow):
         self.trim_time_left_label.setText(label)
 
     def trim_start_changed(self, value: int) -> None:
-        if self.syncing_trim_sliders:
+        if self.setting_trim_range:
             return
-        if value > self.trim_end_slider.value():
-            self.trim_start_slider.setValue(self.trim_end_slider.value())
-            return
-        seconds = value / 1000
-        self.start_edit.setText(f"{seconds:.3f}")
-        self.trim_start_tag.setText(self.format_msec(value, with_tenths=True))
+        self.start_edit.setText(f"{value / 1000:.3f}")
 
     def trim_end_changed(self, value: int) -> None:
-        if self.syncing_trim_sliders:
+        if self.setting_trim_range:
             return
-        if value < self.trim_start_slider.value():
-            self.trim_end_slider.setValue(self.trim_start_slider.value())
-            return
-        seconds = value / 1000
-        self.end_edit.setText(f"{seconds:.3f}")
-        self.trim_end_tag.setText(self.format_msec(value, with_tenths=True))
+        self.end_edit.setText(f"{value / 1000:.3f}")
 
-    def sync_trim_controls_from_fields(self) -> None:
-        self.syncing_trim_sliders = True
+    def sync_trim_range_from_fields(self) -> None:
+        self.setting_trim_range = True
         try:
-            duration = self.player.duration()
+            duration = max(0, self.player.duration())
+            self.trim_range_bar.set_duration(duration)
             start = self.safe_seconds_to_msec(self.start_edit.text())
             end = self.safe_seconds_to_msec(self.end_edit.text()) if self.end_edit.text().strip() else duration
-            self.trim_start_slider.setRange(0, max(0, duration))
-            self.trim_end_slider.setRange(0, max(0, duration))
-            self.trim_start_slider.setValue(max(0, min(start, duration)))
-            self.trim_end_slider.setValue(max(0, min(end, duration)))
-            self.trim_start_tag.setText(self.format_msec(self.trim_start_slider.value(), with_tenths=True))
-            self.trim_end_tag.setText(self.format_msec(self.trim_end_slider.value(), with_tenths=True))
+            self.trim_range_bar.set_range_values(start, end)
         finally:
-            self.syncing_trim_sliders = False
+            self.setting_trim_range = False
 
     def safe_seconds_to_msec(self, value: str) -> int:
         try:
@@ -1225,9 +1320,8 @@ class VideoToolWindow(QMainWindow):
         except VideoError as exc:
             QMessageBox.warning(self, "Export error", str(exc))
             return
-        self.progress.setValue(0)
-        self.percent_label.setText("0%")
-        self.status_label.setText("Starting export...")
+        self.set_progress(0)
+        self.set_status("Starting export...")
         thread = QThread(self)
         worker = RenderWorker(job)
         worker.moveToThread(thread)
@@ -1247,15 +1341,14 @@ class VideoToolWindow(QMainWindow):
     def cancel_render(self) -> None:
         if self.render_worker:
             self.render_worker.cancel()
-        self.status_label.setText("Cancelling...")
+        self.set_status("Cancelling...")
 
     def on_progress(self, value: int) -> None:
-        self.progress.setValue(value)
-        self.percent_label.setText(f"{value}%")
-        self.status_label.setText("Export complete" if value >= 100 else "Exporting...")
+        self.set_progress(value)
+        self.set_status("Export complete" if value >= 100 else "Exporting...")
 
     def render_failed(self, message: str) -> None:
-        self.status_label.setText("Export failed")
+        self.set_status("Export failed")
         if "скасовано" not in message.lower() and "cancelled" not in message.lower():
             QMessageBox.critical(self, "Export error", message)
 
@@ -1272,6 +1365,16 @@ class VideoToolWindow(QMainWindow):
         self.add_files_btn.setEnabled(not running)
         self.output_btn.setEnabled(not running)
         self.operation_combo.setEnabled(not running)
+
+    def set_status(self, text: str) -> None:
+        self.normal_status_label.setText(text)
+        self.trim_status_label.setText(text)
+
+    def set_progress(self, value: int) -> None:
+        self.normal_progress.setValue(value)
+        self.trim_progress.setValue(value)
+        self.normal_percent_label.setText(f"{value}%")
+        self.trim_percent_label.setText(f"{value}%")
 
     def duration_seconds(self, path: Path) -> int:
         try:
