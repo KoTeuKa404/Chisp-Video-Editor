@@ -5,7 +5,7 @@ import tempfile
 from pathlib import Path
 
 from PyQt6.QtCore import QObject, QThread, Qt, QUrl, pyqtSignal
-from PyQt6.QtGui import QPixmap
+from PyQt6.QtGui import QColor, QPainter, QPen, QPixmap
 from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PyQt6.QtMultimediaWidgets import QVideoWidget
 from PyQt6.QtWidgets import (
@@ -63,23 +63,25 @@ QFrame#leftPanel { background: #3f3f3f; border-right: 1px solid #505050; }
 QFrame#previewPanel { background: #5a5a5a; border-left: 1px solid #444444; }
 QFrame#timelinePanel { background: #202020; border-top: 1px solid #4a4a4a; }
 QFrame#timelineTools { background: #333333; border-top: 1px solid #505050; border-bottom: 1px solid #1a1a1a; }
+QFrame#timelineRuler { background: #242424; border-bottom: 2px solid #777777; }
 QFrame#monitor { background: #000000; border: 1px solid #111111; }
 QFrame#mediaCard { background: #2b2b2b; border: 2px solid #555555; }
 QFrame#mediaCard:hover { border: 2px solid #ffd400; }
 QFrame#mediaCard[selected="true"] { border: 3px solid #ffd400; background: #252525; }
 QFrame#mediaThumb { background: #111111; border: 1px solid #222222; }
 QFrame#settingsPanel { background: #252525; border: 1px solid #555555; }
-QFrame#timelineClip { background: #070707; border: 1px solid #101010; }
-QFrame#timelineClipItem { background: #000000; border: 2px solid #ffd400; }
-QFrame#timelineClipItem[selected="true"] { border: 3px solid #ffd400; background: #151515; }
+QFrame#timelineCanvas { background: #1f1f1f; border: 0px; }
+QFrame#timelineClipItem { background: #000000; border: 4px solid #ffd400; }
+QFrame#timelineClipItem[selected="true"] { border: 5px solid #ffd400; background: #050505; }
+QFrame#clipThumb { background: #020202; border: 0px; }
 QFrame#audioClip { background: #5d43c9; border: 2px solid #ffd400; }
 QLabel#title { font-size: 14px; font-weight: 700; color: #ffffff; }
-QLabel#mediaTitle { color: #ffffff; font-size: 12px; font-weight: 700; }
+QLabel#mediaTitle { color: #ffffff; font-size: 12px; font-weight: 800; }
 QLabel#mediaDuration { background: #000000; color: #ffffff; padding: 2px 5px; border-radius: 3px; }
 QLabel#muted { color: #bbbbbb; }
 QLabel#bigTitle { font-size: 27px; color: #ffffff; }
 QLabel#timelineTime { color: #ffffff; font-weight: 700; }
-QLabel#trackName { color: #cccccc; font-weight: 700; }
+QLabel#trackName { color: #ffffff; font-weight: 800; }
 QLineEdit, QSpinBox { background: #191919; color: #ffffff; border: 1px solid #555555; border-radius: 2px; padding: 5px 7px; min-height: 22px; }
 QLineEdit:focus, QSpinBox:focus { border: 1px solid #ffd400; }
 QLineEdit:disabled, QSpinBox:disabled { background: #242424; color: #808080; border: 1px solid #3b3b3b; }
@@ -104,6 +106,8 @@ QPushButton#toolButton:hover { background: #444444; }
 QPushButton#activeToolButton { background: transparent; border: none; border-bottom: 3px solid #ffd400; padding: 7px 10px; color: #ffd400; }
 QPushButton#playButton { background: transparent; border: none; font-size: 25px; color: #ffffff; }
 QPushButton#playButton:hover { color: #ffd400; }
+QPushButton#clipCloseButton { background: transparent; border: none; color: #ffffff; font-size: 26px; font-weight: 400; padding: 0px; }
+QPushButton#clipCloseButton:hover { color: #ffd400; }
 QCheckBox { spacing: 8px; color: #eeeeee; }
 QCheckBox::indicator { width: 16px; height: 16px; border: 1px solid #777777; background: #111111; }
 QCheckBox::indicator:checked { background: #ffd400; border: 1px solid #ffd400; }
@@ -165,6 +169,35 @@ class PreviewWorker(QObject):
             self.finished.emit()
 
 
+class TimelineCanvas(QFrame):
+    def __init__(self) -> None:
+        super().__init__()
+        self.setObjectName("timelineCanvas")
+        self.setMinimumHeight(300)
+        self.setMinimumWidth(2400)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        painter.fillRect(self.rect(), QColor("#1f1f1f"))
+
+        minor = QPen(QColor("#2b2b2b"))
+        major = QPen(QColor("#3a3a3a"))
+        for x in range(0, self.width(), 180):
+            painter.setPen(major if x % 720 == 0 else minor)
+            painter.drawLine(x, 0, x, self.height())
+
+        painter.setPen(QPen(QColor("#777777"), 2))
+        painter.drawLine(0, 0, self.width(), 0)
+
+        painter.setPen(QPen(QColor("#777777"), 3))
+        painter.drawLine(0, 0, 0, self.height())
+        painter.setBrush(QColor("#303030"))
+        painter.drawEllipse(-8, -8, 22, 22)
+
+
 class MediaCard(QFrame):
     clicked = pyqtSignal(Path)
 
@@ -218,11 +251,7 @@ class MediaCard(QFrame):
     def set_thumbnail(self, pixmap: QPixmap) -> None:
         if pixmap.isNull():
             return
-        scaled = pixmap.scaled(
-            self.thumb_frame.size(),
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
+        scaled = pixmap.scaled(self.thumb_frame.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
         self.thumb_label.setPixmap(scaled)
         self.thumb_label.setText("")
 
@@ -234,36 +263,53 @@ class TimelineClip(QFrame):
     clicked = pyqtSignal(int)
     remove_clicked = pyqtSignal(int)
 
-    def __init__(self, index: int, path: Path, duration_text: str) -> None:
+    def __init__(self, index: int, path: Path, duration_text: str, pixmap: QPixmap | None = None) -> None:
         super().__init__()
         self.index = index
         self.path = path
         self.setObjectName("timelineClipItem")
         self.setProperty("selected", False)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        self.setMinimumWidth(220)
-        self.setMaximumWidth(360)
+        self.setFixedSize(185, 260)
 
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(8)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.setSpacing(6)
 
-        name = QLabel(path.name)
-        name.setObjectName("mediaTitle")
-        name.setWordWrap(True)
+        top = QHBoxLayout()
+        top.setContentsMargins(0, 0, 0, 0)
+        top.addStretch()
+        close = QPushButton("×")
+        close.setObjectName("clipCloseButton")
+        close.setFixedSize(30, 30)
+        close.clicked.connect(lambda: self.remove_clicked.emit(self.index))
+        top.addWidget(close)
+        root.addLayout(top)
 
+        self.thumb = QLabel("")
+        self.thumb.setObjectName("muted")
+        self.thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.thumb.setFrameShape(QFrame.Shape.NoFrame)
+        self.thumb.setMinimumHeight(125)
+        self.thumb.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.thumb.setStyleSheet("background:#000000;")
+        root.addWidget(self.thumb, stretch=1)
+
+        title = QLabel(path.name)
+        title.setObjectName("mediaTitle")
+        title.setWordWrap(True)
+        title.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        root.addWidget(title)
+
+        bottom = QHBoxLayout()
+        bottom.addStretch()
         duration = QLabel(duration_text)
         duration.setObjectName("mediaDuration")
+        bottom.addWidget(duration)
+        root.addLayout(bottom)
 
-        remove = QPushButton("×")
-        remove.setObjectName("toolButton")
-        remove.setMaximumWidth(28)
-        remove.clicked.connect(lambda: self.remove_clicked.emit(self.index))
-
-        layout.addWidget(QLabel(str(index + 1)))
-        layout.addWidget(name, stretch=1)
-        layout.addWidget(duration)
-        layout.addWidget(remove)
+        if pixmap is not None and not pixmap.isNull():
+            self.set_thumbnail(pixmap)
 
     def mousePressEvent(self, event) -> None:
         self.clicked.emit(self.index)
@@ -273,6 +319,13 @@ class TimelineClip(QFrame):
         self.setProperty("selected", selected)
         self.style().unpolish(self)
         self.style().polish(self)
+
+    def set_thumbnail(self, pixmap: QPixmap) -> None:
+        if pixmap.isNull():
+            return
+        scaled = pixmap.scaled(165, 125, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        self.thumb.setPixmap(scaled)
+        self.thumb.setText("")
 
 
 class VideoToolWindow(QMainWindow):
@@ -303,6 +356,7 @@ class VideoToolWindow(QMainWindow):
         self.audio_output = QAudioOutput(self)
         self.audio_output.setVolume(0.85)
         self.video_widget = QVideoWidget()
+        self.video_widget.setStyleSheet("background:#000000;")
         self.player.setAudioOutput(self.audio_output)
         self.player.setVideoOutput(self.video_widget)
 
@@ -310,14 +364,6 @@ class VideoToolWindow(QMainWindow):
         self.add_files_btn.setObjectName("yellowButton")
         self.add_color_btn = QPushButton("◉ Add color")
         self.add_color_btn.setObjectName("toolButton")
-        self.audio_btn = QPushButton("Audio")
-        self.audio_btn.setObjectName("toolButton")
-        self.trim_btn = QPushButton("✂ Trim")
-        self.trim_btn.setObjectName("activeToolButton")
-        self.offset_btn = QPushButton("Offset")
-        self.offset_btn.setObjectName("toolButton")
-        self.split_btn = QPushButton("Split")
-        self.split_btn.setObjectName("toolButton")
         self.voiceover_btn = QPushButton("🎙 Voiceover")
         self.voiceover_btn.setObjectName("toolButton")
         self.subtitles_btn = QPushButton("CC Subtitles")
@@ -327,6 +373,8 @@ class VideoToolWindow(QMainWindow):
         self.cancel_btn = QPushButton("Cancel")
         self.cancel_btn.setObjectName("dangerButton")
         self.cancel_btn.setEnabled(False)
+        self.clear_timeline_btn = QPushButton("✕ Clear timeline")
+        self.clear_timeline_btn.setObjectName("toolButton")
 
         self.operation_combo = QComboBox()
         for key, label in OPERATION_LABELS.items():
@@ -563,66 +611,72 @@ class VideoToolWindow(QMainWindow):
         bar.setObjectName("timelineTools")
         layout = QHBoxLayout(bar)
         layout.setContentsMargins(8, 5, 8, 5)
-        layout.setSpacing(8)
-        layout.addWidget(self.audio_btn)
-        layout.addWidget(self.trim_btn)
-        layout.addWidget(self.offset_btn)
-        layout.addWidget(self.split_btn)
+        layout.setSpacing(10)
+        tools = [
+            ("⚙ General", "toolButton"),
+            ("⚙ Audio", "toolButton"),
+            ("✂ Trim", "activeToolButton"),
+            ("◧ Crop", "toolButton"),
+            ("T Text", "toolButton"),
+            ("▤ Filters", "toolButton"),
+            ("▣ PiP", "toolButton"),
+            ("☻ Stickers", "toolButton"),
+            ("↔ Split", "toolButton"),
+        ]
+        for text, obj in tools:
+            button = QPushButton(text)
+            button.setObjectName(obj)
+            layout.addWidget(button)
         layout.addStretch()
-        layout.addWidget(QLabel("Drop multiple videos to join them on export"))
-        layout.addStretch()
+        layout.addWidget(QLabel("↶"))
+        layout.addWidget(QLabel("↷"))
+        layout.addSpacing(8)
+        layout.addWidget(self.clear_timeline_btn)
+        layout.addSpacing(12)
         layout.addWidget(self.status_label)
-        layout.addSpacing(16)
+        layout.addSpacing(8)
         layout.addWidget(self.percent_label)
-        self.progress.setMaximumWidth(260)
+        self.progress.setMaximumWidth(220)
         layout.addWidget(self.progress)
         return bar
 
     def _build_timeline_area(self) -> QWidget:
         panel = QFrame()
         panel.setObjectName("timelinePanel")
-        panel.setMinimumHeight(220)
+        panel.setMinimumHeight(330)
         panel.setAcceptDrops(True)
         layout = QVBoxLayout(panel)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(8)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
 
         ruler = QFrame()
-        ruler.setFixedHeight(22)
+        ruler.setObjectName("timelineRuler")
+        ruler.setFixedHeight(34)
         ruler_layout = QHBoxLayout(ruler)
-        ruler_layout.setContentsMargins(0, 0, 0, 0)
+        ruler_layout.setContentsMargins(8, 0, 8, 0)
         ruler_layout.addWidget(QLabel("0"))
-        ruler_layout.addStretch()
+        ruler_layout.addSpacing(160)
         ruler_layout.addWidget(self.timeline_duration_label)
+        ruler_layout.addStretch()
         layout.addWidget(ruler)
 
-        video_track = QFrame()
-        video_track.setObjectName("timelineClip")
-        video_track.setMinimumHeight(118)
-        video_layout = QHBoxLayout(video_track)
-        video_layout.setContentsMargins(8, 8, 8, 8)
-        track_name = QLabel("Video")
-        track_name.setObjectName("trackName")
-        track_name.setFixedWidth(70)
-        video_layout.addWidget(track_name)
-
         timeline_scroll = QScrollArea()
-        timeline_scroll.setWidgetResizable(True)
+        timeline_scroll.setWidgetResizable(False)
         timeline_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         timeline_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.timeline_widget = QWidget()
-        self.timeline_layout = QHBoxLayout(self.timeline_widget)
-        self.timeline_layout.setContentsMargins(0, 0, 0, 0)
-        self.timeline_layout.setSpacing(8)
-        self.timeline_layout.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        timeline_scroll.setWidget(self.timeline_widget)
-        video_layout.addWidget(timeline_scroll, stretch=1)
+        self.timeline_canvas = TimelineCanvas()
+        self.timeline_layout = QHBoxLayout(self.timeline_canvas)
+        self.timeline_layout.setContentsMargins(14, 18, 14, 14)
+        self.timeline_layout.setSpacing(12)
+        self.timeline_layout.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        timeline_scroll.setWidget(self.timeline_canvas)
+        layout.addWidget(timeline_scroll, stretch=1)
 
         audio_track = QFrame()
         audio_track.setObjectName("audioClip")
-        audio_track.setFixedHeight(36)
+        audio_track.setFixedHeight(44)
         audio_layout = QHBoxLayout(audio_track)
-        audio_layout.setContentsMargins(8, 4, 8, 4)
+        audio_layout.setContentsMargins(10, 4, 10, 4)
         audio_name = QLabel("Audio")
         audio_name.setObjectName("trackName")
         audio_name.setFixedWidth(70)
@@ -630,8 +684,6 @@ class VideoToolWindow(QMainWindow):
         self.audio_track_label.setObjectName("muted")
         audio_layout.addWidget(audio_name)
         audio_layout.addWidget(self.audio_track_label)
-
-        layout.addWidget(video_track)
         layout.addWidget(audio_track)
         return panel
 
@@ -641,6 +693,7 @@ class VideoToolWindow(QMainWindow):
         self.cancel_btn.clicked.connect(self.cancel_render)
         self.output_btn.clicked.connect(self.choose_output_file)
         self.play_btn.clicked.connect(self.play_pause)
+        self.clear_timeline_btn.clicked.connect(self.clear_timeline)
         self.operation_combo.currentIndexChanged.connect(self._refresh_operation_state)
         self.operation_combo.currentIndexChanged.connect(self.refresh_output_suggestion)
         self.player.positionChanged.connect(self.player_position_changed)
@@ -662,7 +715,7 @@ class VideoToolWindow(QMainWindow):
             combo.view().setStyleSheet(popup_qss)
 
     def dragEnterEvent(self, event) -> None:
-        if self.event_has_video_urls(event):
+        if self.paths_from_drop(event):
             event.acceptProposedAction()
         else:
             event.ignore()
@@ -672,9 +725,6 @@ class VideoToolWindow(QMainWindow):
         if paths:
             self.add_paths(paths, append_to_timeline=True, select_first=True)
             event.acceptProposedAction()
-
-    def event_has_video_urls(self, event) -> bool:
-        return bool(self.paths_from_drop(event))
 
     def paths_from_drop(self, event) -> list[Path]:
         data = event.mimeData()
@@ -744,22 +794,38 @@ class VideoToolWindow(QMainWindow):
             placeholder = QLabel("Drop videos here. Multiple clips will be joined on export.")
             placeholder.setObjectName("muted")
             placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            placeholder.setMinimumSize(500, 220)
             self.timeline_layout.addWidget(placeholder)
+            self.timeline_layout.addStretch()
             self.timeline_duration_label.setText("")
             self.audio_track_label.setText("audio follows video clips")
+            self.timeline_canvas.update()
             return
         total = 0
         for index, path in enumerate(self.timeline_paths):
             duration_text = self.duration_text(path)
             total += self.duration_seconds(path)
-            clip = TimelineClip(index, path, duration_text)
+            clip = TimelineClip(index, path, duration_text, self.thumb_cache.get(path))
             clip.clicked.connect(self.select_timeline_clip)
             clip.remove_clicked.connect(self.remove_timeline_clip)
             self.timeline_widgets.append(clip)
             self.timeline_layout.addWidget(clip)
+        self.timeline_layout.addStretch()
         self.timeline_duration_label.setText(self.format_seconds(total))
         self.audio_track_label.setText(f"{len(self.timeline_paths)} clip(s) audio")
         self.update_timeline_selection()
+        self.timeline_canvas.update()
+
+    def clear_timeline(self) -> None:
+        self.timeline_paths.clear()
+        self.current_input_path = None
+        self.player.stop()
+        self.player.setSource(QUrl())
+        self.rebuild_timeline()
+        self.update_selected_cards()
+        self.time_left_label.setText("00:00.0")
+        self.time_right_label.setText("00:00")
+        self.preview_slider.setRange(0, 0)
 
     def select_media(self, path: Path) -> None:
         self.current_input_path = path
@@ -785,6 +851,7 @@ class VideoToolWindow(QMainWindow):
             else:
                 self.player.stop()
                 self.player.setSource(QUrl())
+                self.update_selected_cards()
 
     def update_selected_cards(self) -> None:
         for path, card in self.media_cards.items():
@@ -796,6 +863,7 @@ class VideoToolWindow(QMainWindow):
 
     def load_player(self, path: Path) -> None:
         self.player.stop()
+        self.player.setVideoOutput(self.video_widget)
         self.player.setSource(QUrl.fromLocalFile(str(path.resolve())))
         self.time_left_label.setText("00:00.0")
         self.time_right_label.setText(self.duration_text(path))
@@ -825,9 +893,10 @@ class VideoToolWindow(QMainWindow):
         if duration > 0:
             self.time_right_label.setText(self.format_msec(duration))
 
-    def player_error(self, error, error_string: str) -> None:
+    def player_error(self, _error, error_string: str) -> None:
         if error_string:
-            self.status_label.setText(f"Playback error: {error_string}")
+            self.status_label.setText("Playback error")
+            QMessageBox.warning(self, "Playback error", error_string)
 
     def slider_pressed(self) -> None:
         self.slider_is_pressed = True
@@ -913,17 +982,14 @@ class VideoToolWindow(QMainWindow):
     def build_job(self, *, allow_missing_output: bool = False) -> VideoJob:
         if not self.timeline_paths and self.current_input_path is None:
             raise VideoError("Спочатку перетягни відео в редактор")
-
         input_paths = tuple(self.timeline_paths) if self.timeline_paths else (self.current_input_path,)  # type: ignore[arg-type]
         input_path = input_paths[0]
         operation = "concat" if len(input_paths) > 1 else self.current_operation()
-
         output_text = self.output_edit.text().strip()
         if not output_text:
             output_text = str(self.suggest_output_path(input_path))
             if not allow_missing_output:
                 self.output_edit.setText(output_text)
-
         return VideoJob(
             operation=operation,
             input_path=input_path,
@@ -953,24 +1019,21 @@ class VideoToolWindow(QMainWindow):
             return
         if self.current_input_path is None:
             return
-        try:
-            job = VideoJob(
-                operation=self.current_operation(),
-                input_path=self.current_input_path,
-                output_path=Path(self.temp_dir.name) / "dummy.mp4",
-                crf=self.crf_spin.value(),
-                preset=self.preset_combo.currentText(),
-                codec=self.codec_combo.currentText(),
-                width=self.optional_int(self.width_spin),
-                height=self.optional_int(self.height_spin),
-                fps=self.optional_int(self.fps_spin),
-                crop_x=self.crop_x_spin.value(),
-                crop_y=self.crop_y_spin.value(),
-                crop_w=self.optional_int(self.crop_w_spin),
-                crop_h=self.optional_int(self.crop_h_spin),
-            )
-        except Exception:
-            return
+        job = VideoJob(
+            operation=self.current_operation(),
+            input_path=self.current_input_path,
+            output_path=Path(self.temp_dir.name) / "dummy.mp4",
+            crf=self.crf_spin.value(),
+            preset=self.preset_combo.currentText(),
+            codec=self.codec_combo.currentText(),
+            width=self.optional_int(self.width_spin),
+            height=self.optional_int(self.height_spin),
+            fps=self.optional_int(self.fps_spin),
+            crop_x=self.crop_x_spin.value(),
+            crop_y=self.crop_y_spin.value(),
+            crop_w=self.optional_int(self.crop_w_spin),
+            crop_h=self.optional_int(self.crop_h_spin),
+        )
         preview_path = Path(self.temp_dir.name) / f"thumb_{abs(hash(str(self.current_input_path)))}.jpg"
         preview_time = self.preview_time_edit.text().strip() or "0"
         thread = QThread(self)
@@ -995,6 +1058,9 @@ class VideoToolWindow(QMainWindow):
         self.thumb_cache[source] = pixmap
         if source in self.media_cards:
             self.media_cards[source].set_thumbnail(pixmap)
+        for clip in self.timeline_widgets:
+            if clip.path == source:
+                clip.set_thumbnail(pixmap)
 
     def preview_thread_finished(self) -> None:
         self.preview_worker = None
@@ -1018,7 +1084,6 @@ class VideoToolWindow(QMainWindow):
         self.render_worker = worker
         thread.started.connect(worker.run)
         worker.progress.connect(self.on_progress)
-        worker.log.connect(self.append_log)
         worker.failed.connect(self.render_failed)
         worker.finished.connect(self.render_worker_finished)
         worker.finished.connect(thread.quit)
@@ -1057,9 +1122,6 @@ class VideoToolWindow(QMainWindow):
         self.output_btn.setEnabled(not running)
         self.operation_combo.setEnabled(not running)
 
-    def append_log(self, _text: str) -> None:
-        pass
-
     def duration_seconds(self, path: Path) -> int:
         try:
             return int(probe_duration(path))
@@ -1087,9 +1149,6 @@ class VideoToolWindow(QMainWindow):
         if with_tenths:
             return f"{minutes:02d}:{seconds:04.1f}"
         return f"{minutes:02d}:{int(seconds):02d}"
-
-    def resizeEvent(self, event) -> None:
-        super().resizeEvent(event)
 
     def closeEvent(self, event) -> None:
         self.player.stop()
