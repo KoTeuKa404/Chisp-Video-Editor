@@ -3,9 +3,7 @@ from __future__ import annotations
 """Launcher for the current video editor UI.
 
 This keeps the existing large UI implementation from the previous blob, but patches
-one missed PyQt import before executing it. The previous implementation used
-QPointF in custom vector icons without importing it, which caused a NameError in
-IconButton.paintEvent.
+PyQt compatibility issues before executing it.
 """
 
 import subprocess
@@ -31,7 +29,16 @@ def load_editor_source() -> str:
             "Could not load bundled video editor source from git history. "
             f"git stderr: {result.stderr.strip()}"
         )
-    return result.stdout.replace(MISSING_IMPORT, FIXED_IMPORT)
+    source = result.stdout.replace(MISSING_IMPORT, FIXED_IMPORT)
+    source = source.replace(
+        "r.center() + QPointF(-6, -10),\n"
+        "                r.center() + QPointF(-6, 10),\n"
+        "                r.center() + QPointF(10, 0),",
+        "QPointF(r.center()) + QPointF(-6, -10),\n"
+        "                QPointF(r.center()) + QPointF(-6, 10),\n"
+        "                QPointF(r.center()) + QPointF(10, 0),",
+    )
+    return source
 
 
 if __name__ == "__main__":
