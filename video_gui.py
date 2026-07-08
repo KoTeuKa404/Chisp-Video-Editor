@@ -220,6 +220,44 @@ class TrimRangeBar(QWidget):
         return f"{minutes:02d}:{seconds:04.1f}"
 '''
 
+APPLY_TRIM_METHOD_CODE = r'''
+    def apply_trim_and_exit(self) -> None:
+        duration = max(0, self.player.duration())
+        start = self.safe_seconds_to_msec(self.start_edit.text())
+        end = self.safe_seconds_to_msec(self.end_edit.text()) if self.end_edit.text().strip() else duration
+        if duration > 0:
+            start = max(0, min(start, duration))
+            end = max(0, min(end, duration))
+        if end <= start:
+            QMessageBox.warning(self, "Trim", "End має бути більший за Start.")
+            return
+        self.set_operation("trim")
+        self.start_edit.setText(f"{start / 1000:.3f}")
+        self.end_edit.setText(f"{end / 1000:.3f}")
+        if hasattr(self, "trim_range_bar"):
+            self.trim_range_bar.set_range_values(start, end)
+        self.player.pause()
+        self.exit_mode()
+        self.player.setPosition(start)
+        trim_seconds = max(1, int(round((end - start) / 1000)))
+        self.time_left_label.setText(self.format_msec(start, with_tenths=True))
+        self.time_right_label.setText(self.format_seconds(trim_seconds))
+        self.trim_time_right_label.setText(self.format_seconds(trim_seconds))
+        self.rebuild_timeline()
+        self.update_timeline_selection()
+        self.set_status(f"Trim applied: {self.format_seconds(trim_seconds)}")
+'''
+
+CLIP_DURATION_HELPER_CODE = r'''
+    def clip_duration_seconds(self, path: Path) -> int:
+        if path == self.current_input_path and self.current_operation() == "trim":
+            start = self.safe_seconds_to_msec(self.start_edit.text())
+            end = self.safe_seconds_to_msec(self.end_edit.text()) if self.end_edit.text().strip() else self.player.duration()
+            if end > start:
+                return max(1, int(round((end - start) / 1000)))
+        return self.duration_seconds(path)
+'''
+
 
 def replace_between(source: str, start_marker: str, end_marker: str, replacement: str) -> str:
     start = source.find(start_marker)
@@ -263,6 +301,56 @@ def load_editor_source() -> str:
     source = replace_between(source, "class TrimRangeBar(QWidget):", "class MediaCard(QFrame):", TRIM_RANGE_BAR_CODE)
     source = source.replace('self.volume_icon = StaticIcon("volume")', 'self.volume_icon = VolumeButton(self.audio_output)')
     source = source.replace('self.trim_volume_icon = StaticIcon("volume")', 'self.trim_volume_icon = VolumeButton(self.audio_output)')
+
+    source = source.replace(
+        "        self.done_trim_btn.clicked.connect(self.exit_mode)",
+        "        self.done_trim_btn.clicked.connect(self.apply_trim_and_exit)",
+    )
+    source = source.replace(
+        "    def exit_mode(self) -> None:",
+        APPLY_TRIM_METHOD_CODE + "\n    def exit_mode(self) -> None:",
+    )
+    source = source.replace(
+        "            total += self.duration_seconds(path)\n"
+        "            clip = TimelineClip(index, path, self.duration_text(path), self.thumb_cache.get(path))",
+        "            clip_seconds = self.clip_duration_seconds(path)\n"
+        "            total += clip_seconds\n"
+        "            clip = TimelineClip(index, path, self.format_seconds(clip_seconds), self.thumb_cache.get(path))",
+    )
+    source = source.replace(
+        "    def duration_seconds(self, path: Path) -> int:",
+        CLIP_DURATION_HELPER_CODE + "\n    def duration_seconds(self, path: Path) -> int:",
+    )
+    source = source.replace(
+        '        if self.current_mode == "trim":\n'
+        '            start = self.trim_range_bar.start_value\n'
+        '            end = self.trim_range_bar.end_value\n'
+        '            pos = self.player.position()\n'
+        '            if end > start and (pos < start or pos >= end):\n'
+        '                self.player.setPosition(start)',
+        '        if self.current_operation() == "trim":\n'
+        '            start = self.safe_seconds_to_msec(self.start_edit.text())\n'
+        '            end = self.safe_seconds_to_msec(self.end_edit.text()) if self.end_edit.text().strip() else self.player.duration()\n'
+        '            if self.current_mode == "trim":\n'
+        '                start = self.trim_range_bar.start_value\n'
+        '                end = self.trim_range_bar.end_value\n'
+        '            pos = self.player.position()\n'
+        '            if end > start and (pos < start or pos >= end):\n'
+        '                self.player.setPosition(start)',
+    )
+    source = source.replace(
+        '        if self.current_mode == "trim" and self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:\n'
+        '            end = self.trim_range_bar.end_value\n'
+        '            start = self.trim_range_bar.start_value\n'
+        '            if end > start and position >= end:',
+        '        if self.current_operation() == "trim" and self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:\n'
+        '            start = self.safe_seconds_to_msec(self.start_edit.text())\n'
+        '            end = self.safe_seconds_to_msec(self.end_edit.text()) if self.end_edit.text().strip() else self.player.duration()\n'
+        '            if self.current_mode == "trim":\n'
+        '                start = self.trim_range_bar.start_value\n'
+        '                end = self.trim_range_bar.end_value\n'
+        '            if end > start and position >= end:',
+    )
     return source
 
 
