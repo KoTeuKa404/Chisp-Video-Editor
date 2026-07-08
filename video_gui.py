@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import math
 import sys
 import tempfile
 from pathlib import Path
 
-from PyQt6.QtCore import QObject, QRect, QThread, Qt, QUrl, pyqtSignal
-from PyQt6.QtGui import QColor, QMouseEvent, QPainter, QPen, QPixmap
+from PyQt6.QtCore import QObject, QRect, QRectF, QThread, Qt, QUrl, pyqtSignal
+from PyQt6.QtGui import QColor, QMouseEvent, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
 from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PyQt6.QtMultimediaWidgets import QVideoWidget
 from PyQt6.QtWidgets import (
@@ -101,17 +102,11 @@ QLineEdit, QSpinBox { background: #191919; color: #ffffff; border: 1px solid #55
 QLineEdit:focus, QSpinBox:focus { border: 1px solid #ffd400; }
 QLineEdit:disabled, QSpinBox:disabled { background: #242424; color: #808080; border: 1px solid #3b3b3b; }
 QComboBox { background: #191919; color: #ffffff; border: 1px solid #555555; border-radius: 2px; padding: 5px 28px 5px 7px; min-height: 22px; }
-QComboBox:hover { border: 1px solid #777777; }
-QComboBox:focus { border: 1px solid #ffd400; }
 QComboBox::drop-down { subcontrol-origin: padding; subcontrol-position: top right; width: 24px; border-left: 1px solid #444444; background: #151515; }
 QComboBox::down-arrow { image: none; width: 0px; height: 0px; border-left: 5px solid transparent; border-right: 5px solid transparent; border-top: 6px solid #ffffff; margin-right: 7px; }
 QComboBox QAbstractItemView { background: #191919; color: #ffffff; border: 1px solid #555555; selection-background-color: #ffd400; selection-color: #111111; outline: 0px; padding: 2px; }
-QComboBox QAbstractItemView::item { background: #191919; color: #ffffff; min-height: 26px; padding: 5px 8px; }
-QComboBox QAbstractItemView::item:hover { background: #333333; color: #ffffff; }
-QComboBox QAbstractItemView::item:selected { background: #ffd400; color: #111111; }
 QPushButton { background: #3a3a3a; color: #ffffff; border: 1px solid #555555; padding: 7px 11px; font-weight: 700; }
 QPushButton:hover { background: #494949; border: 1px solid #777777; }
-QPushButton:pressed { background: #242424; }
 QPushButton:disabled { background: #2a2a2a; color: #777777; border: 1px solid #3a3a3a; }
 QPushButton#yellowButton { background: #ffd400; color: #111111; border: 1px solid #ffd400; font-weight: 900; }
 QPushButton#yellowButton:hover { background: #ffe45c; }
@@ -119,12 +114,11 @@ QPushButton#dangerButton { background: #3a2222; color: #ffd0d0; border: 1px soli
 QPushButton#toolButton { background: transparent; border: none; padding: 7px 10px; color: #eeeeee; }
 QPushButton#toolButton:hover { background: #444444; }
 QPushButton#activeToolButton { background: transparent; border: none; border-bottom: 3px solid #ffd400; padding: 7px 10px; color: #ffd400; }
-QPushButton#playButton { background: transparent; border: none; font-size: 25px; color: #ffffff; }
-QPushButton#playButton:hover { color: #ffd400; }
 QPushButton#clipCloseButton { background: transparent; border: none; color: #ffffff; font-size: 26px; font-weight: 400; padding: 0px; }
 QPushButton#clipCloseButton:hover { color: #ffd400; }
-QPushButton#backButton { background: #ffd400; color: #111111; border: 0px; font-size: 24px; font-weight: 900; min-width: 54px; min-height: 34px; }
-QPushButton#doneButton { background: #0b7de3; color: #ffffff; border: 1px solid #0b7de3; font-weight: 900; min-width: 90px; }
+QPushButton#backButton { background: #ffd400; color: #111111; border: 0px; font-size: 22px; font-weight: 900; min-width: 54px; min-height: 34px; }
+QPushButton#doneButton { background: #ffd400; color: #111111; border: 1px solid #ffd400; font-weight: 900; min-width: 90px; }
+QPushButton#doneButton:hover { background: #ffe45c; }
 QCheckBox { spacing: 8px; color: #eeeeee; }
 QCheckBox::indicator { width: 16px; height: 16px; border: 1px solid #777777; background: #111111; }
 QCheckBox::indicator:checked { background: #ffd400; border: 1px solid #ffd400; }
@@ -185,6 +179,73 @@ class PreviewWorker(QObject):
             self.finished.emit()
 
 
+class IconButton(QPushButton):
+    def __init__(self, kind: str, *, size: int = 42, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.kind = kind
+        self.setFixedSize(size, size)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setStyleSheet("background:transparent; border:0px;")
+
+    def set_kind(self, kind: str) -> None:
+        self.kind = kind
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        hover = self.underMouse()
+        bg = QColor("#4b4b4b") if hover else QColor(0, 0, 0, 0)
+        painter.setBrush(bg)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawRoundedRect(self.rect().adjusted(2, 2, -2, -2), 4, 4)
+        painter.setBrush(QColor("#ffffff"))
+        painter.setPen(QPen(QColor("#ffffff"), 2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        r = self.rect()
+        if self.kind == "play":
+            poly = QPolygonF([
+                r.center() + QPointF(-6, -10),
+                r.center() + QPointF(-6, 10),
+                r.center() + QPointF(10, 0),
+            ])
+            painter.drawPolygon(poly)
+        elif self.kind == "pause":
+            cx = r.center().x()
+            cy = r.center().y()
+            painter.drawRect(QRectF(cx - 9, cy - 11, 6, 22))
+            painter.drawRect(QRectF(cx + 3, cy - 11, 6, 22))
+        elif self.kind == "back":
+            cx = r.center().x()
+            cy = r.center().y()
+            painter.drawLine(cx + 9, cy - 10, cx - 7, cy)
+            painter.drawLine(cx - 7, cy, cx + 9, cy + 10)
+        elif self.kind == "volume":
+            cx = r.center().x()
+            cy = r.center().y()
+            painter.drawPolygon(QPolygonF([
+                QPointF(cx - 12, cy - 5), QPointF(cx - 6, cy - 5),
+                QPointF(cx + 1, cy - 12), QPointF(cx + 1, cy + 12),
+                QPointF(cx - 6, cy + 5), QPointF(cx - 12, cy + 5),
+            ]))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawArc(QRectF(cx + 2, cy - 9, 16, 18), -45 * 16, 90 * 16)
+            painter.drawArc(QRectF(cx + 5, cy - 14, 24, 28), -45 * 16, 90 * 16)
+
+
+class StaticIcon(QWidget):
+    def __init__(self, kind: str, *, size: int = 34) -> None:
+        super().__init__()
+        self.kind = kind
+        self.setFixedSize(size, size)
+
+    def paintEvent(self, event) -> None:
+        btn = IconButton(self.kind, size=self.width())
+        btn.resize(self.size())
+        painter = QPainter(self)
+        btn.render(painter)
+
+
 class TimelineCanvas(QFrame):
     def __init__(self) -> None:
         super().__init__()
@@ -241,6 +302,7 @@ class TrimRangeBar(QWidget):
         end = max(start, min(end, self.duration))
         self.start_value = start
         self.end_value = end
+        self.position = start
         self.update()
 
     def bar_rect(self) -> QRect:
@@ -268,22 +330,18 @@ class TrimRangeBar(QWidget):
         sx = self.value_to_x(self.start_value)
         ex = self.value_to_x(self.end_value)
         px = self.value_to_x(self.position)
-
         painter.setPen(QPen(QColor("#bdbdbd"), 3))
         painter.drawLine(rect.left(), y, rect.right(), y)
         painter.setPen(QPen(QColor("#ffd400"), 4))
         painter.drawLine(sx, y, ex, y)
-
         painter.setPen(QPen(QColor("#ffd400"), 3))
         painter.setBrush(QColor("#5a5a5a"))
         painter.drawEllipse(sx - 9, y - 9, 18, 18)
         painter.drawLine(ex, y - 16, ex, y + 16)
         painter.drawLine(ex - 3, y - 16, ex + 3, y - 16)
         painter.drawLine(ex - 3, y + 16, ex + 3, y + 16)
-
         painter.setPen(QPen(QColor("#ffd400"), 2))
         painter.drawLine(px, y - 15, px, y + 15)
-
         self.draw_tag(painter, sx, 0, self.format_msec(self.start_value))
         self.draw_tag(painter, ex, 0, self.format_msec(self.end_value))
 
@@ -303,16 +361,18 @@ class TrimRangeBar(QWidget):
         x = int(event.position().x())
         sx = self.value_to_x(self.start_value)
         ex = self.value_to_x(self.end_value)
-        if abs(x - sx) <= 16:
+        if abs(x - sx) <= 18:
             self.drag_target = "start"
-        elif abs(x - ex) <= 16:
+            self.position = self.start_value
+            self.seekRequested.emit(self.position)
+        elif abs(x - ex) <= 18:
             self.drag_target = "end"
         else:
             self.drag_target = "position"
             value = self.x_to_value(x)
             self.position = value
             self.seekRequested.emit(value)
-            self.update()
+        self.update()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
         if not self.drag_target or self.duration <= 0:
@@ -321,7 +381,9 @@ class TrimRangeBar(QWidget):
         if self.drag_target == "start":
             value = min(value, self.end_value)
             self.start_value = value
+            self.position = value
             self.startChanged.emit(value)
+            self.seekRequested.emit(value)
         elif self.drag_target == "end":
             value = max(value, self.start_value)
             self.end_value = value
@@ -352,7 +414,6 @@ class MediaCard(QFrame):
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setMinimumSize(128, 126)
         self.setMaximumWidth(170)
-
         layout = QVBoxLayout(self)
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(5)
@@ -393,7 +454,7 @@ class MediaCard(QFrame):
         self.thumb_label.setText("")
 
     def short_name(self, value: str, limit: int = 19) -> str:
-        return value if len(value) <= limit else value[: limit - 1] + "…"
+        return value if len(value) <= limit else value[: limit - 1] + "..."
 
 
 class TimelineClip(QFrame):
@@ -413,7 +474,7 @@ class TimelineClip(QFrame):
         root.setSpacing(6)
         top = QHBoxLayout()
         top.addStretch()
-        close = QPushButton("×")
+        close = QPushButton("x")
         close.setObjectName("clipCloseButton")
         close.setFixedSize(30, 30)
         close.clicked.connect(lambda: self.remove_clicked.emit(self.index))
@@ -491,13 +552,13 @@ class VideoToolWindow(QMainWindow):
         self.player.setVideoOutput(self.normal_video_widget)
 
         self.add_files_btn = QPushButton("+ Add files"); self.add_files_btn.setObjectName("yellowButton")
-        self.add_color_btn = QPushButton("◉ Add color"); self.add_color_btn.setObjectName("toolButton")
-        self.voiceover_btn = QPushButton("🎙 Voiceover"); self.voiceover_btn.setObjectName("toolButton")
-        self.subtitles_btn = QPushButton("CC Subtitles"); self.subtitles_btn.setObjectName("toolButton")
+        self.add_color_btn = QPushButton("Add color"); self.add_color_btn.setObjectName("toolButton")
+        self.voiceover_btn = QPushButton("Voiceover"); self.voiceover_btn.setObjectName("toolButton")
+        self.subtitles_btn = QPushButton("Subtitles"); self.subtitles_btn.setObjectName("toolButton")
         self.export_btn = QPushButton("Export video"); self.export_btn.setObjectName("yellowButton")
         self.cancel_btn = QPushButton("Cancel"); self.cancel_btn.setObjectName("dangerButton"); self.cancel_btn.setEnabled(False)
-        self.normal_clear_timeline_btn = QPushButton("✕ Clear timeline"); self.normal_clear_timeline_btn.setObjectName("toolButton")
-        self.trim_clear_timeline_btn = QPushButton("✕ Clear timeline"); self.trim_clear_timeline_btn.setObjectName("toolButton")
+        self.normal_clear_timeline_btn = QPushButton("Clear timeline"); self.normal_clear_timeline_btn.setObjectName("toolButton")
+        self.trim_clear_timeline_btn = QPushButton("Clear timeline"); self.trim_clear_timeline_btn.setObjectName("toolButton")
 
         self.operation_combo = QComboBox()
         for key, label in OPERATION_LABELS.items():
@@ -529,8 +590,10 @@ class VideoToolWindow(QMainWindow):
         self.mode_primary_btn = QPushButton("")
         self.mode_secondary_btn = QPushButton("")
 
-        self.play_btn = QPushButton("▶"); self.play_btn.setObjectName("playButton")
-        self.trim_play_btn = QPushButton("▶"); self.trim_play_btn.setObjectName("playButton")
+        self.play_btn = IconButton("play")
+        self.trim_play_btn = IconButton("play")
+        self.volume_icon = StaticIcon("volume")
+        self.trim_volume_icon = StaticIcon("volume")
         self.preview_slider = QSlider(Qt.Orientation.Horizontal); self.preview_slider.setRange(0, 0)
         self.trim_range_bar = TrimRangeBar()
         self.time_left_label = QLabel("00:00.0"); self.time_left_label.setObjectName("muted")
@@ -538,7 +601,7 @@ class VideoToolWindow(QMainWindow):
         self.trim_time_left_label = QLabel("00:00.0"); self.trim_time_left_label.setObjectName("muted")
         self.trim_time_right_label = QLabel("00:00"); self.trim_time_right_label.setObjectName("muted")
         self.done_trim_btn = QPushButton("Done"); self.done_trim_btn.setObjectName("doneButton")
-        self.back_trim_btn = QPushButton("←"); self.back_trim_btn.setObjectName("backButton")
+        self.back_trim_btn = QPushButton("<"); self.back_trim_btn.setObjectName("backButton")
         self.normal_status_label = QLabel("Ready"); self.normal_status_label.setObjectName("muted")
         self.trim_status_label = QLabel("Ready"); self.trim_status_label.setObjectName("muted")
         self.normal_percent_label = QLabel("0%"); self.normal_percent_label.setObjectName("muted")
@@ -591,7 +654,7 @@ class VideoToolWindow(QMainWindow):
         layout = QHBoxLayout(bar); layout.setContentsMargins(8, 6, 8, 6); layout.setSpacing(8)
         media_title = QLabel("Media Library"); media_title.setObjectName("bigTitle")
         layout.addWidget(media_title); layout.addSpacing(8); layout.addWidget(self.add_files_btn); layout.addWidget(self.add_color_btn)
-        for text in ["✱", "▦", "▥", "♪", "⌕", "▣"]:
+        for text in ["Effects", "Video", "Image", "Audio", "Search", "Grid"]:
             btn = QPushButton(text); btn.setObjectName("toolButton"); layout.addWidget(btn)
         layout.addStretch()
         layout.addWidget(QLabel("Operation:")); layout.addWidget(self.operation_combo)
@@ -647,7 +710,7 @@ class VideoToolWindow(QMainWindow):
         layout.addWidget(monitor, stretch=1)
         controls = QHBoxLayout(); controls.setSpacing(12)
         controls.addWidget(self.play_btn); controls.addWidget(self.time_left_label); controls.addWidget(self.preview_slider, stretch=1)
-        controls.addWidget(self.time_right_label); controls.addWidget(QLabel("🔊")); controls.addWidget(QLabel("⛶"))
+        controls.addWidget(self.time_right_label); controls.addWidget(self.volume_icon); controls.addWidget(QLabel("Fullscreen"))
         layout.addLayout(controls)
         preview_row = QHBoxLayout(); preview_row.addStretch(); preview_row.addWidget(QLabel("Preview time:")); preview_row.addWidget(self.preview_time_edit)
         update_preview_btn = QPushButton("Update thumbnail"); update_preview_btn.clicked.connect(self.start_preview); preview_row.addWidget(update_preview_btn)
@@ -665,7 +728,6 @@ class VideoToolWindow(QMainWindow):
         title = QLabel("Trim"); title.setObjectName("trimTitle")
         header_layout.addWidget(title); header_layout.addStretch()
         layout.addWidget(header)
-
         body = QFrame(); body.setObjectName("trimBody")
         body_layout = QVBoxLayout(body); body_layout.setContentsMargins(22, 18, 22, 12); body_layout.setSpacing(10)
         monitor_row = QHBoxLayout(); monitor_row.addStretch()
@@ -678,7 +740,7 @@ class VideoToolWindow(QMainWindow):
         strip.addWidget(self.trim_time_left_label)
         strip.addWidget(self.trim_range_bar, stretch=1)
         strip.addWidget(self.trim_time_right_label)
-        strip.addWidget(QLabel("🔊"))
+        strip.addWidget(self.trim_volume_icon)
         strip.addWidget(self.done_trim_btn)
         body_layout.addLayout(strip)
         layout.addWidget(body, stretch=1)
@@ -690,9 +752,9 @@ class VideoToolWindow(QMainWindow):
         bar = QFrame(); bar.setObjectName("timelineTools")
         layout = QHBoxLayout(bar); layout.setContentsMargins(8, 5, 8, 5); layout.setSpacing(10)
         specs = [
-            ("audio", "⚙ Audio"), ("trim", "✂ Trim"), ("crop", "◧ Crop"),
-            ("text", "T Text"), ("filters", "▤ Filters"), ("pip", "▣ PiP"),
-            ("stickers", "☻ Stickers"), ("split", "↔ Split"),
+            ("audio", "Audio"), ("trim", "Trim"), ("crop", "Crop"),
+            ("text", "Text"), ("filters", "Filters"), ("pip", "PiP"),
+            ("stickers", "Stickers"), ("split", "Split"),
         ]
         for mode, text in specs:
             button = QPushButton(text)
@@ -701,7 +763,7 @@ class VideoToolWindow(QMainWindow):
             target[mode] = button
             layout.addWidget(button)
         layout.addStretch()
-        layout.addWidget(QLabel("↶")); layout.addWidget(QLabel("↷")); layout.addSpacing(8)
+        layout.addWidget(QLabel("Undo")); layout.addWidget(QLabel("Redo")); layout.addSpacing(8)
         layout.addWidget(clear_button); layout.addSpacing(12); layout.addWidget(status_label); layout.addSpacing(8); layout.addWidget(percent_label)
         progress.setMaximumWidth(220); layout.addWidget(progress)
         return bar
@@ -1080,9 +1142,9 @@ class VideoToolWindow(QMainWindow):
         self.player.play()
 
     def player_state_changed(self, state: QMediaPlayer.PlaybackState) -> None:
-        text = "⏸" if state == QMediaPlayer.PlaybackState.PlayingState else "▶"
-        self.play_btn.setText(text)
-        self.trim_play_btn.setText(text)
+        playing = state == QMediaPlayer.PlaybackState.PlayingState
+        self.play_btn.set_kind("pause" if playing else "play")
+        self.trim_play_btn.set_kind("pause" if playing else "play")
 
     def player_position_changed(self, position: int) -> None:
         if not self.slider_is_pressed:
@@ -1145,6 +1207,7 @@ class VideoToolWindow(QMainWindow):
             start = self.safe_seconds_to_msec(self.start_edit.text())
             end = self.safe_seconds_to_msec(self.end_edit.text()) if self.end_edit.text().strip() else duration
             self.trim_range_bar.set_range_values(start, end)
+            self.player.setPosition(max(0, min(start, duration)))
         finally:
             self.setting_trim_range = False
 
